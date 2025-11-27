@@ -6,6 +6,8 @@ use anyhow::Result;
 pub enum PgMessage {
     Startup(StartupMessage),
     Regular(RegularMessage),
+    RowDescription(RowDescription),
+    DataRow(DataRow),
     SSLRequest,
 }
 
@@ -19,6 +21,27 @@ pub struct StartupMessage {
 pub struct RegularMessage {
     pub message_type: u8,
     pub payload: BytesMut,
+}
+
+#[derive(Debug, Clone)]
+pub struct RowDescription {
+    pub fields: Vec<FieldDescription>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FieldDescription {
+    pub name: String,
+    pub table_oid: u32,
+    pub column_index: u16,
+    pub type_oid: u32,
+    pub type_len: i16,
+    pub type_modifier: i32,
+    pub format_code: i16,
+}
+
+#[derive(Debug, Clone)]
+pub struct DataRow {
+    pub values: Vec<Option<BytesMut>>,
 }
 
 pub struct PostgresCodec {
@@ -117,10 +140,54 @@ impl Decoder for PostgresCodec {
             let mut data = src.split_to(frame_len);
             data.advance(5); // Skip Type (1) + Length (4)
 
-            Ok(Some(PgMessage::Regular(RegularMessage {
-                message_type,
-                payload: data,
-            })))
+            match message_type {
+                b'T' => {
+                    // RowDescription
+                    let num_fields = data.get_u16();
+                    let mut fields = Vec::with_capacity(num_fields as usize);
+                    for _ in 0..num_fields {
+                        let name = read_cstring(&mut data)?;
+                        let table_oid = data.get_u32();
+                        let column_index = data.get_u16();
+                        let type_oid = data.get_u32();
+                        let type_len = data.get_i16();
+                        let type_modifier = data.get_i32();
+                        let format_code = data.get_i16();
+                        
+                        fields.push(FieldDescription {
+                            name,
+                            table_oid,
+                            column_index,
+                            type_oid,
+                            type_len,
+                            type_modifier,
+                            format_code,
+                        });
+                    }
+                    Ok(Some(PgMessage::RowDescription(RowDescription { fields })))
+                }
+                b'D' => {
+                    // DataRow
+                    let num_cols = data.get_u16();
+                    let mut values = Vec::with_capacity(num_cols as usize);
+                    for _ in 0..num_cols {
+                        let len = data.get_i32();
+                        if len == -1 {
+                            values.push(None);
+                        } else {
+                            let val = data.split_to(len as usize);
+                            values.push(Some(val));
+                        }
+                    }
+                    Ok(Some(PgMessage::DataRow(DataRow { values })))
+                }
+                _ => {
+                    Ok(Some(PgMessage::Regular(RegularMessage {
+                        message_type,
+                        payload: data,
+                    })))
+                }
+            }
         }
     }
 }
@@ -153,6 +220,54 @@ impl Encoder<PgMessage> for PostgresCodec {
             PgMessage::SSLRequest => {
                 dst.put_u32(8);
                 dst.put_u32(80877103);
+            }
+            PgMessage::RowDescription(msg) => {
+                dst.put_u8(b'T');
+                
+                // Calculate length
+                let mut len = 4 + 2; // Length + NumFields
+                for field in &msg.fields {
+                    len += field.name.len() + 1; // Name + Null
+                    len += 4 + 2 + 4 + 2 + 4 + 2; // TableOID + ColIdx + TypeOID + TypeLen + TypeMod + Format
+                }
+                
+                dst.put_u32(len as u32);
+                dst.put_u16(msg.fields.len() as u16);
+                
+                for field in &msg.fields {
+                    dst.put_slice(field.name.as_bytes());
+                    dst.put_u8(0);
+                    dst.put_u32(field.table_oid);
+                    dst.put_u16(field.column_index);
+                    dst.put_u32(field.type_oid);
+                    dst.put_i16(field.type_len);
+                    dst.put_i32(field.type_modifier);
+                    dst.put_i16(field.format_code);
+                }
+            }
+            PgMessage::DataRow(msg) => {
+                dst.put_u8(b'D');
+                
+                // Calculate length
+                let mut len = 4 + 2; // Length + NumCols
+                for val in &msg.values {
+                    len += 4; // ColLen
+                    if let Some(v) = val {
+                        len += v.len();
+                    }
+                }
+                
+                dst.put_u32(len as u32);
+                dst.put_u16(msg.values.len() as u16);
+                
+                for val in &msg.values {
+                    if let Some(v) = val {
+                        dst.put_i32(v.len() as i32);
+                        dst.put_slice(v);
+                    } else {
+                        dst.put_i32(-1);
+                    }
+                }
             }
             PgMessage::Regular(msg) => {
                 dst.put_u8(msg.message_type);
@@ -228,6 +343,74 @@ mod tests {
             assert_eq!(msg.payload, BytesMut::from(&query[..]));
         } else {
             panic!("Expected Regular message");
+        }
+    }
+
+    #[test]
+    fn test_decode_row_description() {
+        let mut codec = PostgresCodec::new();
+        codec.is_startup = false;
+        let mut buf = BytesMut::new();
+
+        // 'T' (RowDescription)
+        // Length (4) + NumFields (2) + Field1...
+        // Field1: "email"\0 + TableOID(4) + ColIdx(2) + TypeOID(4) + TypeLen(2) + TypeMod(4) + Format(2)
+        
+        let name = b"email\0";
+        let field_len = name.len() + 4 + 2 + 4 + 2 + 4 + 2;
+        let total_len = 4 + 2 + field_len;
+
+        buf.put_u8(b'T');
+        buf.put_u32(total_len as u32);
+        buf.put_u16(1); // 1 field
+
+        buf.put_slice(name);
+        buf.put_u32(100); // Table OID
+        buf.put_u16(2);   // Col Index
+        buf.put_u32(25);  // Type OID (TEXT)
+        buf.put_i16(-1);  // Type Len
+        buf.put_i32(-1);  // Type Mod
+        buf.put_i16(0);   // Format (Text)
+
+        let result = codec.decode(&mut buf).unwrap().unwrap();
+
+        if let PgMessage::RowDescription(msg) = result {
+            assert_eq!(msg.fields.len(), 1);
+            assert_eq!(msg.fields[0].name, "email");
+            assert_eq!(msg.fields[0].table_oid, 100);
+        } else {
+            panic!("Expected RowDescription");
+        }
+    }
+
+    #[test]
+    fn test_decode_data_row() {
+        let mut codec = PostgresCodec::new();
+        codec.is_startup = false;
+        let mut buf = BytesMut::new();
+
+        // 'D' (DataRow)
+        // Length (4) + NumCols (2) + Col1...
+        // Col1: Len(4) + "hello"
+        
+        let val = b"hello";
+        let col_len = 4 + val.len();
+        let total_len = 4 + 2 + col_len;
+
+        buf.put_u8(b'D');
+        buf.put_u32(total_len as u32);
+        buf.put_u16(1); // 1 col
+
+        buf.put_i32(val.len() as i32);
+        buf.put_slice(val);
+
+        let result = codec.decode(&mut buf).unwrap().unwrap();
+
+        if let PgMessage::DataRow(msg) = result {
+            assert_eq!(msg.values.len(), 1);
+            assert_eq!(msg.values[0].as_ref().unwrap(), &BytesMut::from(&val[..]));
+        } else {
+            panic!("Expected DataRow");
         }
     }
 }

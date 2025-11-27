@@ -11,10 +11,10 @@
     - [x] Parse `SimpleQuery` and `ExtendedQuery` flows
     - [x] Intercept `RowDescription` packets (metadata)
     - [x] Intercept `DataRow` packets (actual data)
-- [ ] **1.3 Interception Middleware**
-    - [ ] Create `PacketInterceptor` trait
-    - [ ] Implement logic to modify `DataRow` byte buffers
-    - [ ] Ensure packet length headers are recalculated correctly
+- [x] **1.3 Interception Middleware**
+    - [x] Create `PacketInterceptor` trait
+    - [x] Implement logic to modify `DataRow` byte buffers
+    - [x] Ensure packet length headers are recalculated correctly
 - [ ] **1.4 Basic Faker Implementation**
     - [ ] Integrate `fake-rs` crate
     - [ ] Hardcode a rule to replace a specific column (e.g., "email") with fake data

@@ -4,11 +4,13 @@ use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 mod protocol;
+mod interceptor;
 
 use futures::{SinkExt, StreamExt};
 use tokio::io::AsyncWriteExt;
 use tokio_util::codec::Framed;
 use crate::protocol::postgres::{PostgresCodec, PgMessage};
+use crate::interceptor::{PacketInterceptor, Anonymizer};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -62,6 +64,7 @@ async fn process_connection(client_socket: tokio::net::TcpStream, upstream_host:
     
     let mut client_framed = Framed::new(client_socket, PostgresCodec::new());
     let mut upstream_framed = Framed::new(upstream_socket, PostgresCodec::new_upstream());
+    let mut interceptor = Anonymizer::new();
 
     loop {
         tokio::select! {
@@ -89,7 +92,18 @@ async fn process_connection(client_socket: tokio::net::TcpStream, upstream_host:
             msg = upstream_framed.next() => {
                 match msg {
                     Some(Ok(msg)) => {
-                        client_framed.send(msg).await?;
+                        let msg_to_send = match msg {
+                            PgMessage::RowDescription(ref rd) => {
+                                interceptor.on_row_description(rd);
+                                PgMessage::RowDescription(rd.clone())
+                            }
+                            PgMessage::DataRow(dr) => {
+                                let new_dr = interceptor.on_data_row(dr)?;
+                                PgMessage::DataRow(new_dr)
+                            }
+                            _ => msg,
+                        };
+                        client_framed.send(msg_to_send).await?;
                     }
                     Some(Err(e)) => return Err(e),
                     None => return Ok(()), // Upstream disconnected
