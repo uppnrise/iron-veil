@@ -6,6 +6,10 @@ use fake::faker::phone_number::en::PhoneNumber;
 use fake::faker::address::en::CityName;
 use fake::Fake;
 use std::sync::Arc;
+use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
+use std::hash::{Hash, Hasher};
+use std::collections::hash_map::DefaultHasher;
 
 pub trait PacketInterceptor {
     fn on_row_description(&mut self, msg: &RowDescription);
@@ -59,10 +63,18 @@ impl PacketInterceptor for Anonymizer {
         for (idx, strategy) in &self.target_cols {
             if *idx < msg.values.len() {
                 if let Some(val) = &mut msg.values[*idx] {
+                    // Create a deterministic seed from the original value
+                    let mut hasher = DefaultHasher::new();
+                    val.hash(&mut hasher);
+                    let seed = hasher.finish();
+                    
+                    // Create a seeded RNG
+                    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+
                     let fake_val: String = match strategy.as_str() {
-                        "email" => SafeEmail().fake(),
-                        "phone" => PhoneNumber().fake(),
-                        "address" => CityName().fake(),
+                        "email" => SafeEmail().fake_with_rng(&mut rng),
+                        "phone" => PhoneNumber().fake_with_rng(&mut rng),
+                        "address" => CityName().fake_with_rng(&mut rng),
                         _ => "MASKED".to_string(),
                     };
                     

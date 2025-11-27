@@ -24,9 +24,9 @@
     - [x] Define `proxy.yaml` structure
     - [x] Implement config loader
     - [x] Map table/column names to masking strategies
-- [ ] **2.2 Deterministic Masking**
-    - [ ] Implement seeded hashing / format-preserving encryption
-    - [ ] Ensure "John Doe" always maps to the same fake identity
+- [x] **2.2 Deterministic Masking**
+    - [x] Implement seeded hashing / format-preserving encryption
+    - [x] Ensure "John Doe" always maps to the same fake identity
 - [ ] **2.3 NLP & Heuristic Detection**
     - [ ] Implement Regex scanner for PII (Credit Cards, SSNs, Emails)
     - [ ] (Optional) Integrate `rust-bert` or `ort` for NLP-based name detection
