@@ -3,6 +3,13 @@ use clap::Parser;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
+mod protocol;
+
+use futures::{SinkExt, StreamExt};
+use tokio::io::AsyncWriteExt;
+use tokio_util::codec::Framed;
+use crate::protocol::postgres::{PostgresCodec, PgMessage};
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -50,24 +57,44 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn process_connection(mut client_socket: tokio::net::TcpStream, upstream_host: String, upstream_port: u16) -> Result<()> {
-    let mut upstream_socket = tokio::net::TcpStream::connect(format!("{}:{}", upstream_host, upstream_port)).await?;
+async fn process_connection(client_socket: tokio::net::TcpStream, upstream_host: String, upstream_port: u16) -> Result<()> {
+    let upstream_socket = tokio::net::TcpStream::connect(format!("{}:{}", upstream_host, upstream_port)).await?;
     
-    let (mut client_read, mut client_write) = client_socket.split();
-    let (mut upstream_read, mut upstream_write) = upstream_socket.split();
+    let mut client_framed = Framed::new(client_socket, PostgresCodec::new());
+    let mut upstream_framed = Framed::new(upstream_socket, PostgresCodec::new_upstream());
 
-    // Simple blind forwarding for now
-    let client_to_upstream = tokio::io::copy(&mut client_read, &mut upstream_write);
-    let upstream_to_client = tokio::io::copy(&mut upstream_read, &mut client_write);
-
-    tokio::select! {
-        res = client_to_upstream => {
-            info!("Client disconnected: {:?}", res);
-        }
-        res = upstream_to_client => {
-            info!("Upstream disconnected: {:?}", res);
+    loop {
+        tokio::select! {
+            // Client -> Upstream
+            msg = client_framed.next() => {
+                match msg {
+                    Some(Ok(msg)) => {
+                        match msg {
+                            PgMessage::SSLRequest => {
+                                info!("Received SSLRequest, denying...");
+                                // Deny SSL, force cleartext
+                                client_framed.get_mut().write_all(b"N").await?;
+                            }
+                            _ => {
+                                // Forward other messages (Startup, Query, etc.)
+                                upstream_framed.send(msg).await?;
+                            }
+                        }
+                    }
+                    Some(Err(e)) => return Err(e),
+                    None => return Ok(()), // Client disconnected
+                }
+            }
+            // Upstream -> Client
+            msg = upstream_framed.next() => {
+                match msg {
+                    Some(Ok(msg)) => {
+                        client_framed.send(msg).await?;
+                    }
+                    Some(Err(e)) => return Err(e),
+                    None => return Ok(()), // Upstream disconnected
+                }
+            }
         }
     }
-
-    Ok(())
 }

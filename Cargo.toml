@@ -12,3 +12,4 @@ bytes = "1.5"
 tokio-util = { version = "0.7", features = ["codec", "net"] }
 anyhow = "1.0"
 thiserror = "1.0"
+futures = "0.3.31"

@@ -5,12 +5,12 @@
     - [x] Initialize Rust project with `cargo new`
     - [x] Add dependencies: `tokio`, `clap`, `tracing`, `bytes`, `tokio-util`
     - [x] Set up basic TCP listener and upstream connection forwarding
-- [ ] **1.2 Protocol Parsing (PostgreSQL)**
-    - [ ] Implement `tokio-util` Codec for Postgres Wire Protocol (v3.0)
-    - [ ] Parse `StartupMessage` and Handshake
-    - [ ] Parse `SimpleQuery` and `ExtendedQuery` flows
-    - [ ] Intercept `RowDescription` packets (metadata)
-    - [ ] Intercept `DataRow` packets (actual data)
+- [x] **1.2 Protocol Parsing (PostgreSQL)**
+    - [x] Implement `tokio-util` Codec for Postgres Wire Protocol (v3.0)
+    - [x] Parse `StartupMessage` and Handshake
+    - [x] Parse `SimpleQuery` and `ExtendedQuery` flows
+    - [x] Intercept `RowDescription` packets (metadata)
+    - [x] Intercept `DataRow` packets (actual data)
 - [ ] **1.3 Interception Middleware**
     - [ ] Create `PacketInterceptor` trait
     - [ ] Implement logic to modify `DataRow` byte buffers
