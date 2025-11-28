@@ -14,7 +14,7 @@ services:
 
   # The Upstream Database (Production Simulation)
   postgres:
-    image: postgres:15
+    image: postgres:17
     environment:
       POSTGRES_PASSWORD: password
       POSTGRES_DB: postgres
