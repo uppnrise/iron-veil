@@ -1,0 +1,27 @@
+services:
+  # The Database Proxy
+  proxy:
+    build: .
+    ports:
+      - "6543:6543"
+    depends_on:
+      - postgres
+    environment:
+      - RUST_LOG=info
+    volumes:
+      - ./proxy.yaml:/usr/local/bin/proxy.yaml
+    command: ["./db-proxy", "--upstream-host", "postgres", "--upstream-port", "5432", "--config", "proxy.yaml"]
+
+  # The Upstream Database (Production Simulation)
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432" # Exposed for direct access/seeding if needed
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+volumes:
+  pg_data:

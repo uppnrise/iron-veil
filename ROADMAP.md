@@ -60,6 +60,6 @@
     - [ ] Adapt interception logic for MySQL packets
 
 ## Phase 5: Deployment & Infrastructure
-- [ ] **5.1 Containerization**
-    - [ ] Create production-ready `Dockerfile` (Multi-stage build)
-    - [ ] Create `docker-compose.yml` for full stack simulation (App + Proxy + DB)
+- [x] **5.1 Containerization**
+    - [x] Create production-ready `Dockerfile` (Multi-stage build)
+    - [x] Create `docker-compose.yml` for full stack simulation (App + Proxy + DB)
