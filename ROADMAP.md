@@ -31,7 +31,7 @@
     - [x] Implement Regex scanner for PII (Credit Cards, SSNs, Emails)
     - [ ] (Optional) Integrate `rust-bert` or `ort` for NLP-based name detection
 - [ ] **2.4 Complex Type Handling**
-    - [ ] Support JSON/JSONB masking
+    - [x] Support JSON/JSONB masking
     - [ ] Support Array types
 
 ## Phase 3: Control Plane (Web UI)
