@@ -105,9 +105,9 @@ async fn get_schema() -> Json<Value> {
     }))
 }
 
-async fn get_logs() -> Json<Value> {
+async fn get_logs(State(state): State<AppState>) -> Json<Value> {
+    let logs = state.logs.read().await;
     Json(json!({
-        "logs": [],
-        "note": "In-memory log buffer coming in Phase 4.2"
+        "logs": *logs
     }))
 }

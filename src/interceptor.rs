@@ -127,7 +127,9 @@ fn mask_postgres_array(raw: &str, scanner: &PiiScanner) -> Option<String> {
     }
 }
 
-use tokio::sync::RwLock;
+use crate::state::{AppState, LogEntry};
+use chrono::Utc;
+use serde_json::json;
 
 pub trait PacketInterceptor {
     fn on_row_description(&mut self, msg: &RowDescription) -> impl std::future::Future<Output = ()> + Send;
@@ -135,18 +137,19 @@ pub trait PacketInterceptor {
 }
 
 pub struct Anonymizer {
-    config: Arc<RwLock<AppConfig>>,
+    state: AppState,
     scanner: PiiScanner,
-    // Map of column index to masking strategy
     target_cols: Vec<(usize, String)>,
+    connection_id: usize,
 }
 
 impl Anonymizer {
-    pub fn new(config: Arc<RwLock<AppConfig>>) -> Self {
+    pub fn new(state: AppState, connection_id: usize) -> Self {
         Self {
-            config,
+            state,
             scanner: PiiScanner::new(),
             target_cols: Vec::new(),
+            connection_id,
         }
     }
 }
@@ -155,7 +158,7 @@ impl PacketInterceptor for Anonymizer {
     async fn on_row_description(&mut self, msg: &RowDescription) {
         self.target_cols.clear();
         
-        let config = self.config.read().await;
+        let config = self.state.config.read().await;
         for (i, field) in msg.fields.iter().enumerate() {
             for rule in &config.rules {
                 // Check if rule applies to this column
@@ -177,8 +180,17 @@ impl PacketInterceptor for Anonymizer {
     }
 
     async fn on_data_row(&mut self, mut msg: DataRow) -> Result<DataRow> {
+        let mut changes_log = Vec::new();
+        let mut changed_any = false;
+
         for (i, val_opt) in msg.values.iter_mut().enumerate() {
             if let Some(val) = val_opt {
+                let original_val_preview = if val.len() > 50 {
+                    format!("{}...", String::from_utf8_lossy(&val[..50]))
+                } else {
+                    String::from_utf8_lossy(val).to_string()
+                };
+
                 // 1. Check for explicit rule
                 let explicit_strategy = self.target_cols.iter()
                     .find(|(col_idx, _)| *col_idx == i)
@@ -190,8 +202,18 @@ impl PacketInterceptor for Anonymizer {
                         if let Ok(mut json_val) = serde_json::from_str::<serde_json::Value>(s) {
                             mask_json_recursively(&mut json_val, &self.scanner);
                             let new_json = serde_json::to_string(&json_val)?;
-                            val.clear();
-                            val.extend_from_slice(new_json.as_bytes());
+                            
+                            if new_json.as_bytes() != val.as_slice() {
+                                val.clear();
+                                val.extend_from_slice(new_json.as_bytes());
+                                changed_any = true;
+                                changes_log.push(json!({
+                                    "column_idx": i,
+                                    "strategy": "json",
+                                    "original": original_val_preview,
+                                    "masked": "(JSON Masked)"
+                                }));
+                            }
                             continue;
                         }
                      }
@@ -211,8 +233,17 @@ impl PacketInterceptor for Anonymizer {
                                 Ok(mut json_val) => {
                                     mask_json_recursively(&mut json_val, &self.scanner);
                                     if let Ok(new_json) = serde_json::to_string(&json_val) {
-                                        val.clear();
-                                        val.extend_from_slice(new_json.as_bytes());
+                                        if new_json.as_bytes() != val.as_slice() {
+                                            val.clear();
+                                            val.extend_from_slice(new_json.as_bytes());
+                                            changed_any = true;
+                                            changes_log.push(json!({
+                                                "column_idx": i,
+                                                "strategy": "json (heuristic)",
+                                                "original": original_val_preview,
+                                                "masked": "(JSON Masked)"
+                                            }));
+                                        }
                                         continue;
                                     }
                                 },
@@ -222,6 +253,13 @@ impl PacketInterceptor for Anonymizer {
                                         if let Some(masked_array) = mask_postgres_array(s, &self.scanner) {
                                             val.clear();
                                             val.extend_from_slice(masked_array.as_bytes());
+                                            changed_any = true;
+                                            changes_log.push(json!({
+                                                "column_idx": i,
+                                                "strategy": "array (heuristic)",
+                                                "original": original_val_preview,
+                                                "masked": masked_array
+                                            }));
                                             continue;
                                         }
                                     }
@@ -240,7 +278,7 @@ impl PacketInterceptor for Anonymizer {
                 };
 
                 if let Some(strat) = strategy {
-                    // Create a deterministic seed from the original value
+                    // Apply masking
                     let mut hasher = DefaultHasher::new();
                     val.hash(&mut hasher);
                     let seed = hasher.finish();
@@ -249,9 +287,31 @@ impl PacketInterceptor for Anonymizer {
                     
                     val.clear();
                     val.extend_from_slice(fake_val.as_bytes());
+                    changed_any = true;
+                    
+                    changes_log.push(json!({
+                        "column_idx": i,
+                        "strategy": strat,
+                        "original": original_val_preview,
+                        "masked": fake_val
+                    }));
                 }
             }
         }
+
+        if changed_any {
+            // Log the change
+            let id = format!("{:x}", rand::random::<u128>());
+            self.state.add_log(LogEntry {
+                id,
+                timestamp: Utc::now(),
+                connection_id: self.connection_id,
+                event_type: "DataMasked".to_string(),
+                content: format!("Masked {} fields in DataRow", changes_log.len()),
+                details: Some(json!(changes_log)),
+            }).await;
+        }
+
         Ok(msg)
     }
 }

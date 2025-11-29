@@ -45,12 +45,12 @@
 - [x] **3.3 PII Scanner UI**
     - [x] Create "Scan Database" feature
     - [x] Display PII report and allow "One-click Apply" for rules
-- [ ] **3.4 Live Query Inspector**
-    - [ ] Build "Network Tab" for DB queries
-    - [ ] Show diff view (Original vs. Masked Data)
-- [ ] **3.5 Rules Management UI**
-    - [ ] View active masking rules
-    - [ ] Add/Edit/Delete rules manually
+- [x] **3.4 Live Query Inspector**
+    - [x] Build "Network Tab" for DB queries
+    - [x] Show diff view (Original vs. Masked Data)
+- [x] **3.5 Rules Management UI**
+    - [x] View active masking rules
+    - [x] Add/Edit/Delete rules manually
 
 ## Phase 4: Enterprise Hardening
 - [ ] **4.1 Security**
