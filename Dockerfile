@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y libssl-dev ca-certificates && rm -rf /v
 WORKDIR /usr/local/bin
 
 # Copy the binary from the builder stage
-COPY --from=builder /usr/src/app/target/release/db-proxy .
+COPY --from=builder /usr/src/app/target/release/ironveil .
 
 # Copy the configuration file (default)
 COPY --from=builder /usr/src/app/proxy.yaml .
@@ -26,4 +26,4 @@ EXPOSE 6543
 EXPOSE 3001
 
 # Run the binary
-CMD ["./db-proxy", "--upstream-host", "postgres", "--upstream-port", "5432", "--config", "proxy.yaml"]
+CMD ["./ironveil", "--upstream-host", "postgres", "--upstream-port", "5432", "--config", "proxy.yaml"]

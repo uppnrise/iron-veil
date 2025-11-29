@@ -36,7 +36,7 @@ pub async fn start_api_server(port: u16, state: AppState) {
 async fn health_check() -> Json<Value> {
     Json(json!({
         "status": "ok",
-        "service": "db-proxy",
+        "service": "ironveil",
         "version": env!("CARGO_PKG_VERSION")
     }))
 }

@@ -11,7 +11,7 @@ services:
       - RUST_LOG=info
     volumes:
       - ./proxy.yaml:/usr/local/bin/proxy.yaml
-    command: ["./db-proxy", "--upstream-host", "postgres", "--upstream-port", "5432", "--config", "proxy.yaml", "--api-port", "3001"]
+    command: ["./ironveil", "--upstream-host", "postgres", "--upstream-port", "5432", "--config", "proxy.yaml", "--api-port", "3001"]
 
   # The Upstream Database (Production Simulation)
   postgres:

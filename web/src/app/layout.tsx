@@ -7,8 +7,8 @@ import { Providers } from "@/components/providers";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "DB Proxy Dashboard",
-  description: "Control Plane for Database Anonymization Proxy",
+  title: "IronVeil Dashboard",
+  description: "Control Plane for IronVeil Database Anonymization Proxy",
 };
 
 export default function RootLayout({
