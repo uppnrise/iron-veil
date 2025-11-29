@@ -180,6 +180,14 @@ impl PacketInterceptor for Anonymizer {
     }
 
     async fn on_data_row(&mut self, mut msg: DataRow) -> Result<DataRow> {
+        // Check if masking is globally enabled
+        {
+            let config = self.state.config.read().await;
+            if !config.masking_enabled {
+                return Ok(msg);
+            }
+        }
+
         let mut changes_log = Vec::new();
         let mut changed_any = false;
 

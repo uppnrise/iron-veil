@@ -51,6 +51,10 @@
 - [x] **3.5 Rules Management UI**
     - [x] View active masking rules
     - [x] Add/Edit/Delete rules manually
+- [x] **3.6 General Settings UI**
+    - [x] Global "Emergency Stop" (Disable all masking)
+    - [x] View System Status (Ports, Upstream)
+    - [x] Export Configuration
 
 ## Phase 4: Enterprise Hardening
 - [ ] **4.1 Security**

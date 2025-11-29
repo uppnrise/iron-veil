@@ -4,7 +4,13 @@ use anyhow::Result;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AppConfig {
+    #[serde(default = "default_masking_enabled")]
+    pub masking_enabled: bool,
     pub rules: Vec<MaskingRule>,
+}
+
+fn default_masking_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

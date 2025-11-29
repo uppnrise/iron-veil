@@ -17,6 +17,7 @@ pub async fn start_api_server(port: u16, state: AppState) {
     let app = Router::new()
         .route("/health", get(health_check))
         .route("/rules", get(get_rules).post(add_rule))
+        .route("/config", get(get_config).post(update_config))
         .route("/scan", post(scan_database))
         .route("/connections", get(get_connections))
         .route("/schema", get(get_schema))
@@ -49,6 +50,22 @@ async fn add_rule(State(state): State<AppState>, Json(rule): Json<MaskingRule>) 
     let mut config = state.config.write().await;
     config.rules.push(rule);
     Json(json!({ "status": "success", "rules_count": config.rules.len() }))
+}
+
+async fn get_config(State(state): State<AppState>) -> Json<Value> {
+    let config = state.config.read().await;
+    Json(json!({
+        "masking_enabled": config.masking_enabled,
+        "rules_count": config.rules.len()
+    }))
+}
+
+async fn update_config(State(state): State<AppState>, Json(payload): Json<Value>) -> Json<Value> {
+    let mut config = state.config.write().await;
+    if let Some(enabled) = payload.get("masking_enabled").and_then(|v| v.as_bool()) {
+        config.masking_enabled = enabled;
+    }
+    Json(json!({ "status": "success", "masking_enabled": config.masking_enabled }))
 }
 
 async fn scan_database() -> Json<Value> {
