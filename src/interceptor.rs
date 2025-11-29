@@ -1,5 +1,4 @@
 use crate::protocol::postgres::{DataRow, RowDescription};
-use crate::config::AppConfig;
 use crate::scanner::{PiiScanner, PiiType};
 use anyhow::Result;
 use fake::faker::internet::en::SafeEmail;
@@ -7,7 +6,6 @@ use fake::faker::phone_number::en::PhoneNumber;
 use fake::faker::address::en::CityName;
 use fake::faker::creditcard::en::CreditCardNumber;
 use fake::Fake;
-use std::sync::Arc;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use std::hash::{Hash, Hasher};
@@ -211,7 +209,7 @@ impl PacketInterceptor for Anonymizer {
                             mask_json_recursively(&mut json_val, &self.scanner);
                             let new_json = serde_json::to_string(&json_val)?;
                             
-                            if new_json.as_bytes() != val.as_slice() {
+                            if new_json.as_bytes() != &val[..] {
                                 val.clear();
                                 val.extend_from_slice(new_json.as_bytes());
                                 changed_any = true;
@@ -241,7 +239,7 @@ impl PacketInterceptor for Anonymizer {
                                 Ok(mut json_val) => {
                                     mask_json_recursively(&mut json_val, &self.scanner);
                                     if let Ok(new_json) = serde_json::to_string(&json_val) {
-                                        if new_json.as_bytes() != val.as_slice() {
+                                        if new_json.as_bytes() != &val[..] {
                                             val.clear();
                                             val.extend_from_slice(new_json.as_bytes());
                                             changed_any = true;

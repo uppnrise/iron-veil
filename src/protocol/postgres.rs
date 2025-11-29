@@ -8,6 +8,8 @@ pub enum PgMessage {
     Regular(RegularMessage),
     RowDescription(RowDescription),
     DataRow(DataRow),
+    Query(QueryMessage),
+    Parse(ParseMessage),
     SSLRequest,
 }
 
@@ -15,6 +17,18 @@ pub enum PgMessage {
 pub struct StartupMessage {
     pub protocol_version: u32,
     pub parameters: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct QueryMessage {
+    pub query: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParseMessage {
+    pub statement: String,
+    pub query: String,
+    pub param_types: Vec<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -181,6 +195,20 @@ impl Decoder for PostgresCodec {
                     }
                     Ok(Some(PgMessage::DataRow(DataRow { values })))
                 }
+                b'Q' => {
+                    let query = read_cstring(&mut data)?;
+                    Ok(Some(PgMessage::Query(QueryMessage { query })))
+                }
+                b'P' => {
+                    let statement = read_cstring(&mut data)?;
+                    let query = read_cstring(&mut data)?;
+                    let num_params = data.get_u16();
+                    let mut param_types = Vec::with_capacity(num_params as usize);
+                    for _ in 0..num_params {
+                        param_types.push(data.get_u32());
+                    }
+                    Ok(Some(PgMessage::Parse(ParseMessage { statement, query, param_types })))
+                }
                 _ => {
                     Ok(Some(PgMessage::Regular(RegularMessage {
                         message_type,
@@ -267,6 +295,26 @@ impl Encoder<PgMessage> for PostgresCodec {
                     } else {
                         dst.put_i32(-1);
                     }
+                }
+            }
+            PgMessage::Query(msg) => {
+                dst.put_u8(b'Q');
+                let len = 4 + msg.query.len() + 1;
+                dst.put_u32(len as u32);
+                dst.put_slice(msg.query.as_bytes());
+                dst.put_u8(0);
+            }
+            PgMessage::Parse(msg) => {
+                dst.put_u8(b'P');
+                let len = 4 + msg.statement.len() + 1 + msg.query.len() + 1 + 2 + (msg.param_types.len() * 4);
+                dst.put_u32(len as u32);
+                dst.put_slice(msg.statement.as_bytes());
+                dst.put_u8(0);
+                dst.put_slice(msg.query.as_bytes());
+                dst.put_u8(0);
+                dst.put_u16(msg.param_types.len() as u16);
+                for param in &msg.param_types {
+                    dst.put_u32(*param);
                 }
             }
             PgMessage::Regular(msg) => {

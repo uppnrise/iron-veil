@@ -74,9 +74,6 @@ async fn main() -> Result<()> {
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", args.port)).await?;
 
-    // Use the config from state which is already wrapped in Arc<RwLock>
-    let config = state.config.clone();
-
     loop {
         let (client_socket, client_addr) = listener.accept().await?;
         info!("Accepted connection from {}", client_addr);
@@ -103,7 +100,7 @@ async fn process_connection(client_socket: tokio::net::TcpStream, upstream_host:
     let mut client_framed = Framed::new(client_socket, PostgresCodec::new());
     let mut upstream_framed = Framed::new(upstream_socket, PostgresCodec::new_upstream());
     
-    let connection_id = rand::random::<usize>();
+    let connection_id = rand::random::<u64>() as usize;
     let mut interceptor = Anonymizer::new(state.clone(), connection_id);
 
     loop {
