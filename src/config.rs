@@ -9,6 +9,8 @@ pub struct AppConfig {
     pub rules: Vec<MaskingRule>,
     #[serde(default)]
     pub tls: Option<TlsConfig>,
+    #[serde(default)]
+    pub upstream_tls: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -34,5 +36,85 @@ impl AppConfig {
         let content = fs::read_to_string(path)?;
         let config: AppConfig = serde_yaml::from_str(&content)?;
         Ok(config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_load_valid_yaml() {
+        let yaml = r#"
+masking_enabled: true
+upstream_tls: false
+rules:
+  - table: "users"
+    column: "email"
+    strategy: "email"
+  - column: "phone"
+    strategy: "phone"
+"#;
+        let config: AppConfig = serde_yaml::from_str(yaml).unwrap();
+        
+        assert!(config.masking_enabled);
+        assert!(!config.upstream_tls);
+        assert_eq!(config.rules.len(), 2);
+        assert_eq!(config.rules[0].table, Some("users".to_string()));
+        assert_eq!(config.rules[0].column, "email");
+        assert_eq!(config.rules[0].strategy, "email");
+        assert_eq!(config.rules[1].table, None);
+    }
+
+    #[test]
+    fn test_config_defaults() {
+        let yaml = r#"
+rules: []
+"#;
+        let config: AppConfig = serde_yaml::from_str(yaml).unwrap();
+        
+        assert!(config.masking_enabled); // Should default to true
+        assert!(!config.upstream_tls); // Should default to false
+        assert!(config.tls.is_none()); // Should default to None
+    }
+
+    #[test]
+    fn test_config_with_tls() {
+        let yaml = r#"
+masking_enabled: true
+upstream_tls: true
+tls:
+  enabled: true
+  cert_path: "certs/server.crt"
+  key_path: "certs/server.key"
+rules: []
+"#;
+        let config: AppConfig = serde_yaml::from_str(yaml).unwrap();
+        
+        assert!(config.upstream_tls);
+        assert!(config.tls.is_some());
+        
+        let tls = config.tls.unwrap();
+        assert!(tls.enabled);
+        assert_eq!(tls.cert_path, "certs/server.crt");
+        assert_eq!(tls.key_path, "certs/server.key");
+    }
+
+    #[test]
+    fn test_invalid_yaml_fails() {
+        let yaml = r#"
+invalid yaml content {{
+"#;
+        let result: Result<AppConfig, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_missing_required_fields_fails() {
+        let yaml = r#"
+masking_enabled: true
+"#;
+        let result: Result<AppConfig, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err()); // Should fail because 'rules' is missing
     }
 }

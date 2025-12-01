@@ -3,6 +3,8 @@ tls:
   cert_path: "certs/server.crt"
   key_path: "certs/server.key"
 
+upstream_tls: false
+
 rules:
   - table: "users"
     column: "email"
