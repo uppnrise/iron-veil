@@ -59,7 +59,7 @@
 ## Phase 4: Enterprise Hardening
 - [ ] **4.1 Security**
     - [x] Implement TLS termination (Client -> Proxy)
-    - [ ] Implement Upstream TLS (Proxy -> Prod DB)
+    - [x] Implement Upstream TLS (Proxy -> Prod DB)
 - [ ] **4.2 Performance & Observability**
     - [ ] Optimize for Zero-Copy parsing where possible
     - [ ] Implement Connection Pooling (`bb8` or `deadpool`)
