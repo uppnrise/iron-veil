@@ -169,7 +169,9 @@ impl PacketInterceptor for Anonymizer {
                     true 
                 });
 
-                if table_match && rule.column == field.name {
+                // Convert Bytes field name to str for comparison
+                let field_name = std::str::from_utf8(&field.name).unwrap_or("");
+                if table_match && rule.column == field_name {
                     self.target_cols.push((i, rule.strategy.clone()));
                     break; // Apply first matching rule
                 }
@@ -380,7 +382,7 @@ mod tests {
         let desc = RowDescription {
             fields: vec![
                 FieldDescription {
-                    name: "email_col".to_string(),
+                    name: bytes::Bytes::from_static(b"email_col"),
                     table_oid: 0,
                     column_index: 0,
                     type_oid: 0,

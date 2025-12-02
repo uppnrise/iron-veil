@@ -259,7 +259,7 @@ where
                                     timestamp: Utc::now(),
                                     connection_id,
                                     event_type: "Query".to_string(),
-                                    content: q.query.clone(),
+                                    content: String::from_utf8_lossy(&q.query).to_string(),
                                     details: None,
                                 }).await;
                                 upstream_framed.send(msg).await?;
@@ -271,7 +271,7 @@ where
                                     timestamp: Utc::now(),
                                     connection_id,
                                     event_type: "Parse".to_string(),
-                                    content: p.query.clone(),
+                                    content: String::from_utf8_lossy(&p.query).to_string(),
                                     details: None,
                                 }).await;
                                 upstream_framed.send(msg).await?;

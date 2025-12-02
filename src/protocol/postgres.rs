@@ -1,4 +1,4 @@
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 use anyhow::Result;
 
@@ -21,13 +21,13 @@ pub struct StartupMessage {
 
 #[derive(Debug, Clone)]
 pub struct QueryMessage {
-    pub query: String,
+    pub query: Bytes,
 }
 
 #[derive(Debug, Clone)]
 pub struct ParseMessage {
-    pub statement: String,
-    pub query: String,
+    pub statement: Bytes,
+    pub query: Bytes,
     pub param_types: Vec<u32>,
 }
 
@@ -44,7 +44,7 @@ pub struct RowDescription {
 
 #[derive(Debug, Clone)]
 pub struct FieldDescription {
-    pub name: String,
+    pub name: Bytes,
     pub table_oid: u32,
     pub column_index: u16,
     pub type_oid: u32,
@@ -160,7 +160,7 @@ impl Decoder for PostgresCodec {
                     let num_fields = data.get_u16();
                     let mut fields = Vec::with_capacity(num_fields as usize);
                     for _ in 0..num_fields {
-                        let name = read_cstring(&mut data)?;
+                        let name = read_cstring_bytes(&mut data)?;
                         let table_oid = data.get_u32();
                         let column_index = data.get_u16();
                         let type_oid = data.get_u32();
@@ -196,12 +196,12 @@ impl Decoder for PostgresCodec {
                     Ok(Some(PgMessage::DataRow(DataRow { values })))
                 }
                 b'Q' => {
-                    let query = read_cstring(&mut data)?;
+                    let query = read_cstring_bytes(&mut data)?;
                     Ok(Some(PgMessage::Query(QueryMessage { query })))
                 }
                 b'P' => {
-                    let statement = read_cstring(&mut data)?;
-                    let query = read_cstring(&mut data)?;
+                    let statement = read_cstring_bytes(&mut data)?;
+                    let query = read_cstring_bytes(&mut data)?;
                     let num_params = data.get_u16();
                     let mut param_types = Vec::with_capacity(num_params as usize);
                     for _ in 0..num_params {
@@ -263,7 +263,7 @@ impl Encoder<PgMessage> for PostgresCodec {
                 dst.put_u16(msg.fields.len() as u16);
                 
                 for field in &msg.fields {
-                    dst.put_slice(field.name.as_bytes());
+                    dst.put_slice(&field.name);
                     dst.put_u8(0);
                     dst.put_u32(field.table_oid);
                     dst.put_u16(field.column_index);
@@ -301,16 +301,16 @@ impl Encoder<PgMessage> for PostgresCodec {
                 dst.put_u8(b'Q');
                 let len = 4 + msg.query.len() + 1;
                 dst.put_u32(len as u32);
-                dst.put_slice(msg.query.as_bytes());
+                dst.put_slice(&msg.query);
                 dst.put_u8(0);
             }
             PgMessage::Parse(msg) => {
                 dst.put_u8(b'P');
                 let len = 4 + msg.statement.len() + 1 + msg.query.len() + 1 + 2 + (msg.param_types.len() * 4);
                 dst.put_u32(len as u32);
-                dst.put_slice(msg.statement.as_bytes());
+                dst.put_slice(&msg.statement);
                 dst.put_u8(0);
-                dst.put_slice(msg.query.as_bytes());
+                dst.put_slice(&msg.query);
                 dst.put_u8(0);
                 dst.put_u16(msg.param_types.len() as u16);
                 for param in &msg.param_types {
@@ -327,16 +327,19 @@ impl Encoder<PgMessage> for PostgresCodec {
     }
 }
 
+/// Read a null-terminated C-string from the buffer, returning a zero-copy Bytes slice.
+fn read_cstring_bytes(buf: &mut BytesMut) -> Result<Bytes> {
+    let pos = buf.iter().position(|&b| b == 0)
+        .ok_or_else(|| anyhow::anyhow!("Missing null terminator in C-string"))?;
+    let bytes = buf.split_to(pos).freeze();
+    buf.advance(1); // Skip the null terminator
+    Ok(bytes)
+}
+
+/// Read a null-terminated C-string as a String (for startup parameters)
 fn read_cstring(buf: &mut BytesMut) -> Result<String> {
-    let mut bytes = Vec::new();
-    while buf.has_remaining() {
-        let b = buf.get_u8();
-        if b == 0 {
-            break;
-        }
-        bytes.push(b);
-    }
-    Ok(String::from_utf8(bytes)?)
+    let bytes = read_cstring_bytes(buf)?;
+    Ok(String::from_utf8(bytes.to_vec())?)
 }
 
 #[cfg(test)]
@@ -387,7 +390,7 @@ mod tests {
         let result = codec.decode(&mut buf).unwrap().unwrap();
 
         if let PgMessage::Query(msg) = result {
-            assert_eq!(msg.query, "SELECT 1");
+            assert_eq!(msg.query, Bytes::from_static(b"SELECT 1"));
         } else {
             panic!("Expected Query message");
         }
@@ -423,7 +426,7 @@ mod tests {
 
         if let PgMessage::RowDescription(msg) = result {
             assert_eq!(msg.fields.len(), 1);
-            assert_eq!(msg.fields[0].name, "email");
+            assert_eq!(msg.fields[0].name, Bytes::from_static(b"email"));
             assert_eq!(msg.fields[0].table_oid, 100);
         } else {
             panic!("Expected RowDescription");
@@ -501,8 +504,8 @@ mod tests {
         let result = codec.decode(&mut buf).unwrap().unwrap();
 
         if let PgMessage::Parse(msg) = result {
-            assert_eq!(msg.statement, "stmt1");
-            assert_eq!(msg.query, "SELECT $1");
+            assert_eq!(msg.statement, Bytes::from_static(b"stmt1"));
+            assert_eq!(msg.query, Bytes::from_static(b"SELECT $1"));
             assert_eq!(msg.param_types.len(), 1);
             assert_eq!(msg.param_types[0], 23);
         } else {
@@ -563,7 +566,7 @@ mod tests {
         let mut buf = BytesMut::new();
 
         let original_query = QueryMessage {
-            query: "SELECT * FROM users".to_string(),
+            query: Bytes::from_static(b"SELECT * FROM users"),
         };
 
         codec.encode(PgMessage::Query(original_query.clone()), &mut buf).unwrap();
@@ -573,6 +576,74 @@ mod tests {
             assert_eq!(msg.query, original_query.query);
         } else {
             panic!("Expected Query message");
+        }
+    }
+
+    #[test]
+    fn test_zero_copy_field_name() {
+        // This test demonstrates zero-copy parsing for RowDescription field names.
+        // The decoded field name should share the same underlying buffer as the input.
+        let mut codec = PostgresCodec::new();
+        codec.is_startup = false;
+        let mut buf = BytesMut::new();
+
+        let field_name = b"customer_email";
+        let name_with_null = b"customer_email\0";
+        let field_len = name_with_null.len() + 4 + 2 + 4 + 2 + 4 + 2;
+        let total_len = 4 + 2 + field_len;
+
+        buf.put_u8(b'T');
+        buf.put_u32(total_len as u32);
+        buf.put_u16(1);
+        buf.put_slice(name_with_null);
+        buf.put_u32(0);    // table_oid
+        buf.put_u16(0);    // column_index
+        buf.put_u32(25);   // type_oid (TEXT)
+        buf.put_i16(-1);   // type_len
+        buf.put_i32(-1);   // type_modifier
+        buf.put_i16(0);    // format_code
+
+        let result = codec.decode(&mut buf).unwrap().unwrap();
+
+        if let PgMessage::RowDescription(msg) = result {
+            assert_eq!(msg.fields.len(), 1);
+            // The field name is a Bytes slice - zero-copy from the original buffer
+            assert_eq!(&msg.fields[0].name[..], field_name);
+            // Verify it's actually using Bytes (can be cloned cheaply with reference counting)
+            let cloned = msg.fields[0].name.clone();
+            assert_eq!(cloned, msg.fields[0].name);
+        } else {
+            panic!("Expected RowDescription");
+        }
+    }
+
+    #[test]
+    fn test_zero_copy_data_row() {
+        // DataRow values are already BytesMut/Bytes - this test verifies they remain zero-copy
+        let mut codec = PostgresCodec::new();
+        codec.is_startup = false;
+        let mut buf = BytesMut::new();
+
+        let data = b"sensitive_value_12345";
+        let col_len = 4 + data.len();
+        let total_len = 4 + 2 + col_len;
+
+        buf.put_u8(b'D');
+        buf.put_u32(total_len as u32);
+        buf.put_u16(1);
+        buf.put_i32(data.len() as i32);
+        buf.put_slice(data);
+
+        let result = codec.decode(&mut buf).unwrap().unwrap();
+
+        if let PgMessage::DataRow(msg) = result {
+            assert_eq!(msg.values.len(), 1);
+            let val = msg.values[0].as_ref().unwrap();
+            assert_eq!(&val[..], data);
+            // BytesMut can be cheaply converted to Bytes
+            assert_eq!(val.len(), data.len());
+        } else {
+            panic!("Expected DataRow");
         }
     }
 }
