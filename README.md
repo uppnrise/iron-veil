@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="IronVeil Logo" width="400">
+</p>
+
 # IronVeil
 
 **IronVeil** is a high-performance, Rust-based database proxy designed for real-time PII (Personally Identifiable Information) anonymization. It sits between your application and your database, intercepting queries and masking sensitive data on the fly without requiring changes to your application code.
