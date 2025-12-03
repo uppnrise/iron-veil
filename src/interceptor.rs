@@ -1,4 +1,5 @@
 use crate::protocol::postgres::{DataRow, RowDescription};
+use crate::protocol::mysql::{ColumnDefinition, ResultRow};
 use crate::scanner::{PiiScanner, PiiType};
 use anyhow::Result;
 use fake::faker::internet::en::SafeEmail;
@@ -324,6 +325,170 @@ impl PacketInterceptor for Anonymizer {
     }
 }
 
+// ============================================================================
+// MySQL Interceptor
+// ============================================================================
+
+/// Trait for intercepting MySQL packets
+pub trait MySqlPacketInterceptor {
+    fn on_column_definition(&mut self, col: &ColumnDefinition) -> impl std::future::Future<Output = ()> + Send;
+    fn on_result_row(&mut self, row: ResultRow) -> impl std::future::Future<Output = Result<ResultRow>> + Send;
+}
+
+/// MySQL-specific anonymizer that reuses the core masking logic
+pub struct MySqlAnonymizer {
+    state: AppState,
+    scanner: PiiScanner,
+    target_cols: Vec<(usize, String)>,
+    column_names: Vec<String>,
+    connection_id: usize,
+}
+
+impl MySqlAnonymizer {
+    pub fn new(state: AppState, connection_id: usize) -> Self {
+        Self {
+            state,
+            scanner: PiiScanner::new(),
+            target_cols: Vec::new(),
+            column_names: Vec::new(),
+            connection_id,
+        }
+    }
+
+    /// Reset column tracking for a new result set
+    pub fn reset_columns(&mut self) {
+        self.target_cols.clear();
+        self.column_names.clear();
+    }
+}
+
+impl MySqlPacketInterceptor for MySqlAnonymizer {
+    #[instrument(skip(self, col), fields(column_name = %String::from_utf8_lossy(&col.name)))]
+    async fn on_column_definition(&mut self, col: &ColumnDefinition) {
+        let col_name = String::from_utf8_lossy(&col.name).to_string();
+        let col_idx = self.column_names.len();
+        self.column_names.push(col_name.clone());
+
+        let config = self.state.config.read().await;
+        for rule in &config.rules {
+            // Table match (MySQL provides table name in column def)
+            let table_name = String::from_utf8_lossy(&col.table);
+            let table_match = rule.table.as_ref().is_none_or(|t| t == &*table_name);
+
+            if table_match && rule.column == col_name {
+                self.target_cols.push((col_idx, rule.strategy.clone()));
+                tracing::debug!(column = %col_name, strategy = %rule.strategy, "MySQL column matched rule");
+                break;
+            }
+        }
+    }
+
+    #[instrument(skip(self, row), fields(num_values = row.values.len(), connection_id = self.connection_id))]
+    async fn on_result_row(&mut self, mut row: ResultRow) -> Result<ResultRow> {
+        // Check if masking is globally enabled
+        {
+            let config = self.state.config.read().await;
+            if !config.masking_enabled {
+                return Ok(row);
+            }
+        }
+
+        let mut changes_log = Vec::new();
+        let mut changed_any = false;
+
+        for (i, val_opt) in row.values.iter_mut().enumerate() {
+            if let Some(val) = val_opt {
+                let original_val_preview = if val.len() > 50 {
+                    format!("{}...", String::from_utf8_lossy(&val[..50]))
+                } else {
+                    String::from_utf8_lossy(val).to_string()
+                };
+
+                // Check for explicit rule
+                let explicit_strategy = self.target_cols.iter()
+                    .find(|(col_idx, _)| *col_idx == i)
+                    .map(|(_, strategy)| strategy.as_str());
+
+                // Handle explicit JSON strategy
+                if let Some("json") = explicit_strategy {
+                    if let Ok(s) = std::str::from_utf8(val) {
+                        if let Ok(mut json_val) = serde_json::from_str::<serde_json::Value>(s) {
+                            mask_json_recursively(&mut json_val, &self.scanner);
+                            if let Ok(new_json) = serde_json::to_string(&json_val) {
+                                if new_json.as_bytes() != &val[..] {
+                                    val.clear();
+                                    val.extend_from_slice(new_json.as_bytes());
+                                    changed_any = true;
+                                    changes_log.push(json!({
+                                        "column_idx": i,
+                                        "column_name": self.column_names.get(i).unwrap_or(&"?".to_string()),
+                                        "strategy": "json",
+                                        "original": original_val_preview,
+                                        "masked": "(JSON Masked)"
+                                    }));
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                }
+
+                let strategy = if let Some(s) = explicit_strategy {
+                    Some(s)
+                } else {
+                    // Heuristic scan
+                    if let Ok(s) = std::str::from_utf8(val) {
+                        match self.scanner.scan(s) {
+                            Some(PiiType::Email) => Some("email"),
+                            Some(PiiType::CreditCard) => Some("credit_card"),
+                            None => None,
+                        }
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(strat) = strategy {
+                    use std::hash::{Hash, Hasher};
+                    use std::collections::hash_map::DefaultHasher;
+                    
+                    let mut hasher = DefaultHasher::new();
+                    val.hash(&mut hasher);
+                    let seed = hasher.finish();
+
+                    let fake_val = generate_fake_data(strat, seed);
+
+                    val.clear();
+                    val.extend_from_slice(fake_val.as_bytes());
+                    changed_any = true;
+
+                    changes_log.push(json!({
+                        "column_idx": i,
+                        "column_name": self.column_names.get(i).unwrap_or(&"?".to_string()),
+                        "strategy": strat,
+                        "original": original_val_preview,
+                        "masked": fake_val
+                    }));
+                }
+            }
+        }
+
+        if changed_any {
+            let id = format!("{:x}", rand::random::<u128>());
+            self.state.add_log(LogEntry {
+                id,
+                timestamp: Utc::now(),
+                connection_id: self.connection_id,
+                event_type: "MySqlDataMasked".to_string(),
+                content: format!("Masked {} fields in MySQL ResultRow", changes_log.len()),
+                details: Some(json!(changes_log)),
+            }).await;
+        }
+
+        Ok(row)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,6 +504,7 @@ mod tests {
             rules: vec![],
             tls: None,
             upstream_tls: false,
+            telemetry: None,
         };
         let state = AppState::new(config);
         let mut anonymizer = Anonymizer::new(state, 1);
@@ -378,6 +544,7 @@ mod tests {
              ],
              tls: None,
              upstream_tls: false,
+            telemetry: None,
          };
         let state = AppState::new(config);
         let mut anonymizer = Anonymizer::new(state, 1);
@@ -419,6 +586,7 @@ mod tests {
             rules: vec![],
             tls: None,
             upstream_tls: false,
+            telemetry: None,
         };
         let state = AppState::new(config);
         let mut anonymizer = Anonymizer::new(state, 1);
@@ -471,6 +639,7 @@ mod tests {
             rules: vec![],
             tls: None,
             upstream_tls: false,
+            telemetry: None,
         };
         let state = AppState::new(config);
         let mut anonymizer = Anonymizer::new(state, 1);
@@ -516,6 +685,7 @@ mod tests {
             rules: vec![],
             tls: None,
             upstream_tls: false,
+            telemetry: None,
         };
         let state = AppState::new(config);
         let mut anonymizer = Anonymizer::new(state, 1);
@@ -548,6 +718,7 @@ mod tests {
             rules: vec![],
             tls: None,
             upstream_tls: false,
+            telemetry: None,
         };
         let state = AppState::new(config);
         let mut anonymizer = Anonymizer::new(state, 1);
@@ -571,6 +742,7 @@ mod tests {
             rules: vec![],
             tls: None,
             upstream_tls: false,
+            telemetry: None,
         };
         let state = AppState::new(config);
         let mut anonymizer = Anonymizer::new(state, 1);

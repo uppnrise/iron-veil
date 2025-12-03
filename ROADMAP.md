@@ -63,9 +63,9 @@
 - [x] **4.2 Performance & Observability**
     - [x] Optimize for Zero-Copy parsing where possible
     - [x] Integrate OpenTelemetry (OTEL) for distributed tracing
-- [ ] **4.3 MySQL Support**
-    - [ ] Implement MySQL Wire Protocol parser
-    - [ ] Adapt interception logic for MySQL packets
+- [x] **4.3 MySQL Support**
+    - [x] Implement MySQL Wire Protocol parser
+    - [x] Adapt interception logic for MySQL packets
 
 ## Phase 5: Deployment & Infrastructure
 - [x] **5.1 Containerization**
