@@ -60,10 +60,9 @@
 - [x] **4.1 Security**
     - [x] Implement TLS termination (Client -> Proxy)
     - [x] Implement Upstream TLS (Proxy -> Prod DB)
-- [ ] **4.2 Performance & Observability**
+- [x] **4.2 Performance & Observability**
     - [x] Optimize for Zero-Copy parsing where possible
-    - [ ] Implement Connection Pooling (not needed for proxy - connections are stateful per-client)
-    - [ ] Integrate OpenTelemetry (OTEL) for distributed tracing
+    - [x] Integrate OpenTelemetry (OTEL) for distributed tracing
 - [ ] **4.3 MySQL Support**
     - [ ] Implement MySQL Wire Protocol parser
     - [ ] Adapt interception logic for MySQL packets

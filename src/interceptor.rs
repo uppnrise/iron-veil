@@ -128,6 +128,7 @@ fn mask_postgres_array(raw: &str, scanner: &PiiScanner) -> Option<String> {
 use crate::state::{AppState, LogEntry};
 use chrono::Utc;
 use serde_json::json;
+use tracing::instrument;
 
 pub trait PacketInterceptor {
     fn on_row_description(&mut self, msg: &RowDescription) -> impl std::future::Future<Output = ()> + Send;
@@ -153,6 +154,7 @@ impl Anonymizer {
 }
 
 impl PacketInterceptor for Anonymizer {
+    #[instrument(skip(self, msg), fields(num_fields = msg.fields.len()))]
     async fn on_row_description(&mut self, msg: &RowDescription) {
         self.target_cols.clear();
         
@@ -179,6 +181,7 @@ impl PacketInterceptor for Anonymizer {
         }
     }
 
+    #[instrument(skip(self, msg), fields(num_values = msg.values.len(), connection_id = self.connection_id))]
     async fn on_data_row(&mut self, mut msg: DataRow) -> Result<DataRow> {
         // Check if masking is globally enabled
         {

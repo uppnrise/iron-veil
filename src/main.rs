@@ -1,7 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use tracing::{info, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing::{info, info_span, Instrument};
 
 mod protocol;
 mod interceptor;
@@ -9,6 +8,7 @@ mod config;
 mod scanner;
 mod api;
 mod state;
+mod telemetry;
 
 use futures::{SinkExt, StreamExt};
 use tokio::io::AsyncWriteExt;
@@ -58,17 +58,14 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
-        .finish();
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("setting default subscriber failed");
-
     let args = Args::parse();
 
     // Load configuration
     let config = AppConfig::load(&args.config)?;
+    
+    // Initialize telemetry (must be done before any tracing calls)
+    let _telemetry_guard = telemetry::init_telemetry(config.telemetry.as_ref())?;
+    
     info!("Loaded {} masking rules from {}", config.rules.len(), args.config);
 
     // Load TLS config if enabled
@@ -115,13 +112,22 @@ async fn main() -> Result<()> {
         let tls_acceptor = tls_acceptor.clone();
 
         tokio::spawn(async move {
-            state.active_connections.fetch_add(1, Ordering::Relaxed);
-            let result = process_connection(client_socket, upstream_host, upstream_port, state.clone(), tls_acceptor).await;
-            state.active_connections.fetch_sub(1, Ordering::Relaxed);
+            let span = info_span!(
+                "connection",
+                client.addr = %client_addr,
+                upstream.host = %upstream_host,
+                upstream.port = %upstream_port
+            );
+            
+            async {
+                state.active_connections.fetch_add(1, Ordering::Relaxed);
+                let result = process_connection(client_socket, upstream_host, upstream_port, state.clone(), tls_acceptor).await;
+                state.active_connections.fetch_sub(1, Ordering::Relaxed);
 
-            if let Err(e) = result {
-                tracing::error!("Connection error: {}", e);
-            }
+                if let Err(e) = result {
+                    tracing::error!(error = %e, "Connection error");
+                }
+            }.instrument(span).await
         });
     }
 }

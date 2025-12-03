@@ -27,3 +27,9 @@ tokio-rustls = "0.26.4"
 rustls = "0.23.35"
 rustls-pemfile = "2.2.0"
 rustls-platform-verifier = "0.6.2"
+
+# OpenTelemetry
+opentelemetry = { version = "0.27", features = ["trace", "metrics"] }
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.27", features = ["tonic", "metrics"] }
+tracing-opentelemetry = "0.28"

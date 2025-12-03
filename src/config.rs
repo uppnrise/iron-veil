@@ -11,6 +11,8 @@ pub struct AppConfig {
     pub tls: Option<TlsConfig>,
     #[serde(default)]
     pub upstream_tls: bool,
+    #[serde(default)]
+    pub telemetry: Option<TelemetryConfig>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -18,6 +20,24 @@ pub struct TlsConfig {
     pub enabled: bool,
     pub cert_path: String,
     pub key_path: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct TelemetryConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_otlp_endpoint")]
+    pub otlp_endpoint: String,
+    #[serde(default = "default_service_name")]
+    pub service_name: String,
+}
+
+fn default_otlp_endpoint() -> String {
+    "http://localhost:4317".to_string()
+}
+
+fn default_service_name() -> String {
+    "iron-veil".to_string()
 }
 
 fn default_masking_enabled() -> bool {

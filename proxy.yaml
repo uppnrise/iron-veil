@@ -5,6 +5,13 @@ tls:
 
 upstream_tls: false
 
+# OpenTelemetry Configuration
+# Traces are exported to an OTLP-compatible collector (Jaeger, Grafana Tempo, etc.)
+telemetry:
+  enabled: false
+  otlp_endpoint: "http://localhost:4317"
+  service_name: "iron-veil"
+
 rules:
   - table: "users"
     column: "email"
