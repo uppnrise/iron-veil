@@ -7,8 +7,8 @@ COPY . .
 # Build the application in release mode
 RUN cargo build --release
 
-# Runtime Stage
-FROM debian:bookworm-slim
+# Runtime Stage - use trixie to match glibc version from rust:latest
+FROM debian:trixie-slim
 
 # Install OpenSSL and CA certificates (useful for future TLS support)
 RUN apt-get update && apt-get install -y libssl-dev ca-certificates && rm -rf /var/lib/apt/lists/*
