@@ -529,7 +529,7 @@ mod tests {
             rules: vec![],
             tls: None,
             upstream_tls: false,
-            telemetry: None, api: None,
+            telemetry: None, api: None, limits: None,
         };
         let state = AppState::new(config);
         let mut anonymizer = Anonymizer::new(state, 1);
@@ -567,7 +567,7 @@ mod tests {
             }],
             tls: None,
             upstream_tls: false,
-            telemetry: None, api: None,
+            telemetry: None, api: None, limits: None,
         };
         let state = AppState::new(config);
         let mut anonymizer = Anonymizer::new(state, 1);
@@ -608,7 +608,7 @@ mod tests {
             rules: vec![],
             tls: None,
             upstream_tls: false,
-            telemetry: None, api: None,
+            telemetry: None, api: None, limits: None,
         };
         let state = AppState::new(config);
         let mut anonymizer = Anonymizer::new(state, 1);
@@ -659,7 +659,7 @@ mod tests {
             rules: vec![],
             tls: None,
             upstream_tls: false,
-            telemetry: None, api: None,
+            telemetry: None, api: None, limits: None,
         };
         let state = AppState::new(config);
         let mut anonymizer = Anonymizer::new(state, 1);
@@ -703,7 +703,7 @@ mod tests {
             rules: vec![],
             tls: None,
             upstream_tls: false,
-            telemetry: None, api: None,
+            telemetry: None, api: None, limits: None,
         };
         let state = AppState::new(config);
         let mut anonymizer = Anonymizer::new(state, 1);
@@ -736,7 +736,7 @@ mod tests {
             rules: vec![],
             tls: None,
             upstream_tls: false,
-            telemetry: None, api: None,
+            telemetry: None, api: None, limits: None,
         };
         let state = AppState::new(config);
         let mut anonymizer = Anonymizer::new(state, 1);
@@ -763,7 +763,7 @@ mod tests {
             rules: vec![],
             tls: None,
             upstream_tls: false,
-            telemetry: None, api: None,
+            telemetry: None, api: None, limits: None,
         };
         let state = AppState::new(config);
         let mut anonymizer = Anonymizer::new(state, 1);

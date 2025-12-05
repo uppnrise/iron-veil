@@ -24,6 +24,14 @@ api:
   # Uncomment and set a secure secret for production use:
   # jwt_secret: "your-jwt-secret-here"
 
+# Connection Limits
+limits:
+  # Maximum number of concurrent connections (default: unlimited)
+  # max_connections: 1000
+  
+  # Rate limit: max new connections per second (default: unlimited)
+  # connections_per_second: 100
+
 rules:
   - table: "users"
     column: "email"

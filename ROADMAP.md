@@ -31,11 +31,11 @@ This document outlines the remaining work needed to make IronVeil production-rea
 
 **Files:** `src/api.rs`, `src/config.rs`, `proxy.yaml`
 
-### 4. Connection Limits & Rate Limiting
-- [ ] Add `max_connections` config option
-- [ ] Implement connection semaphore/pool
-- [ ] Add rate limiting for new connections
-- [ ] Return proper error when limit reached
+### 4. Connection Limits & Rate Limiting ✅
+- [x] Add `max_connections` config option
+- [x] Implement connection semaphore/pool
+- [x] Add rate limiting for new connections (`connections_per_second`)
+- [x] Return proper error when limit reached (connection rejected with warning log)
 
 **Files:** `src/main.rs`, `src/config.rs`
 

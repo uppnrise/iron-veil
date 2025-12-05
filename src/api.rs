@@ -390,7 +390,7 @@ mod tests {
             }],
             tls: None,
             upstream_tls: false,
-            telemetry: None, api: None,
+            telemetry: None, api: None, limits: None,
         };
         let state = AppState::new(config);
 
@@ -408,7 +408,7 @@ mod tests {
             rules: vec![],
             tls: None,
             upstream_tls: false,
-            telemetry: None, api: None,
+            telemetry: None, api: None, limits: None,
         };
         let state = AppState::new(config);
 
@@ -431,7 +431,7 @@ mod tests {
             rules: vec![],
             tls: None,
             upstream_tls: false,
-            telemetry: None, api: None,
+            telemetry: None, api: None, limits: None,
         };
         let state = AppState::new(config);
 
@@ -464,7 +464,7 @@ mod tests {
             }],
             tls: None,
             upstream_tls: false,
-            telemetry: None, api: None,
+            telemetry: None, api: None, limits: None,
         };
         let state = AppState::new(config);
 
@@ -482,7 +482,7 @@ mod tests {
             rules: vec![],
             tls: None,
             upstream_tls: false,
-            telemetry: None, api: None,
+            telemetry: None, api: None, limits: None,
         };
         let state = AppState::new(config);
 

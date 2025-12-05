@@ -98,6 +98,11 @@ api:
   api_key: "your-secret-key"  # Optional: protects endpoints via X-API-Key header
   jwt_secret: "your-jwt-secret"  # Optional: allows Authorization: Bearer <token>
 
+# Connection Limits
+limits:
+  max_connections: 1000  # Optional: max concurrent connections
+  connections_per_second: 100  # Optional: rate limit for new connections
+
 # Masking Rules
 rules:
   - table: "users"        # Table-specific rule

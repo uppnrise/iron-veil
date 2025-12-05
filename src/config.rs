@@ -15,6 +15,19 @@ pub struct AppConfig {
     pub telemetry: Option<TelemetryConfig>,
     #[serde(default)]
     pub api: Option<ApiConfig>,
+    #[serde(default)]
+    pub limits: Option<LimitsConfig>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct LimitsConfig {
+    /// Maximum number of concurrent connections (default: unlimited)
+    #[serde(default)]
+    pub max_connections: Option<usize>,
+    
+    /// Rate limit: max new connections per second (default: unlimited)
+    #[serde(default)]
+    pub connections_per_second: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -75,6 +88,7 @@ impl Default for AppConfig {
             upstream_tls: false,
             telemetry: None,
             api: None,
+            limits: None,
         }
     }
 }

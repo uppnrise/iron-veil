@@ -1,5 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
+use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info, info_span, warn};
 
@@ -159,12 +161,65 @@ async fn main() -> Result<()> {
     let cancel_token = CancellationToken::new();
     let shutdown_timeout = args.shutdown_timeout;
 
+    // Connection limiting
+    let max_connections = config
+        .limits
+        .as_ref()
+        .and_then(|l| l.max_connections);
+    let connection_semaphore = max_connections.map(|max| {
+        info!("Connection limit set to {}", max);
+        Arc::new(Semaphore::new(max))
+    });
+    
+    // Rate limiting state
+    let rate_limit = config
+        .limits
+        .as_ref()
+        .and_then(|l| l.connections_per_second);
+    if let Some(rate) = rate_limit {
+        info!("Rate limit set to {} connections/second", rate);
+    }
+    let mut rate_limit_tokens: u32 = rate_limit.unwrap_or(0);
+    let mut last_refill = Instant::now();
+
     // Accept connections until shutdown signal
     loop {
         tokio::select! {
             // Wait for new connection
             accept_result = listener.accept() => {
                 let (client_socket, client_addr) = accept_result?;
+                
+                // Rate limiting check
+                if let Some(max_rate) = rate_limit {
+                    // Refill tokens based on elapsed time
+                    let elapsed = last_refill.elapsed();
+                    if elapsed >= Duration::from_secs(1) {
+                        rate_limit_tokens = max_rate;
+                        last_refill = Instant::now();
+                    }
+                    
+                    if rate_limit_tokens == 0 {
+                        warn!("Rate limit exceeded, rejecting connection from {}", client_addr);
+                        drop(client_socket);
+                        continue;
+                    }
+                    rate_limit_tokens = rate_limit_tokens.saturating_sub(1);
+                }
+                
+                // Connection limit check
+                let permit = if let Some(ref sem) = connection_semaphore {
+                    match sem.clone().try_acquire_owned() {
+                        Ok(permit) => Some(permit),
+                        Err(_) => {
+                            warn!("Connection limit reached, rejecting connection from {}", client_addr);
+                            drop(client_socket);
+                            continue;
+                        }
+                    }
+                } else {
+                    None
+                };
+                
                 info!("Accepted connection from {}", client_addr);
 
                 let upstream_host = args.upstream_host.clone();
@@ -173,6 +228,9 @@ async fn main() -> Result<()> {
                 let tls_acceptor = tls_acceptor.clone();
 
                 tokio::spawn(async move {
+                    // Hold the permit for the duration of the connection
+                    let _permit = permit;
+                    
                     let span = info_span!(
                         "connection",
                         client.addr = %client_addr,
