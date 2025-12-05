@@ -8,11 +8,11 @@ This document outlines the remaining work needed to make IronVeil production-rea
 
 ## 🔴 Critical (Must Have Before Production)
 
-### 1. Graceful Shutdown
-- [ ] Add signal handling (SIGTERM, SIGINT)
-- [ ] Drain active connections before shutdown
-- [ ] Flush OpenTelemetry traces on shutdown
-- [ ] Add configurable shutdown timeout
+### 1. Graceful Shutdown ✅
+- [x] Add signal handling (SIGTERM, SIGINT)
+- [x] Drain active connections before shutdown
+- [x] Flush OpenTelemetry traces on shutdown
+- [x] Add configurable shutdown timeout (`--shutdown-timeout`)
 
 **Files:** `src/main.rs`
 

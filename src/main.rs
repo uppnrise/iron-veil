@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
-use tracing::{Instrument, info, info_span};
+use tokio_util::sync::CancellationToken;
+use tracing::{Instrument, info, info_span, warn};
 
 mod api;
 mod config;
@@ -66,6 +67,35 @@ struct Args {
     /// Database protocol to proxy
     #[arg(long, value_enum, default_value_t = DbProtocol::Postgres)]
     protocol: DbProtocol,
+
+    /// Graceful shutdown timeout in seconds
+    #[arg(long, default_value_t = 30)]
+    shutdown_timeout: u64,
+}
+
+/// Waits for a shutdown signal (SIGTERM, SIGINT, or Ctrl+C)
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("Failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => info!("Received Ctrl+C, initiating shutdown..."),
+        _ = terminate => info!("Received SIGTERM, initiating shutdown..."),
+    }
 }
 
 #[tokio::main]
@@ -123,57 +153,96 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", args.port)).await?;
     let protocol = args.protocol;
 
+    // Create cancellation token for graceful shutdown
+    let cancel_token = CancellationToken::new();
+    let shutdown_timeout = args.shutdown_timeout;
+
+    // Accept connections until shutdown signal
     loop {
-        let (client_socket, client_addr) = listener.accept().await?;
-        info!("Accepted connection from {}", client_addr);
+        tokio::select! {
+            // Wait for new connection
+            accept_result = listener.accept() => {
+                let (client_socket, client_addr) = accept_result?;
+                info!("Accepted connection from {}", client_addr);
 
-        let upstream_host = args.upstream_host.clone();
-        let upstream_port = args.upstream_port;
-        let state = state.clone();
-        let tls_acceptor = tls_acceptor.clone();
+                let upstream_host = args.upstream_host.clone();
+                let upstream_port = args.upstream_port;
+                let state = state.clone();
+                let tls_acceptor = tls_acceptor.clone();
 
-        tokio::spawn(async move {
-            let span = info_span!(
-                "connection",
-                client.addr = %client_addr,
-                upstream.host = %upstream_host,
-                upstream.port = %upstream_port,
-                protocol = ?protocol
-            );
+                tokio::spawn(async move {
+                    let span = info_span!(
+                        "connection",
+                        client.addr = %client_addr,
+                        upstream.host = %upstream_host,
+                        upstream.port = %upstream_port,
+                        protocol = ?protocol
+                    );
 
-            async {
-                state.active_connections.fetch_add(1, Ordering::Relaxed);
-                let result = match protocol {
-                    DbProtocol::Postgres => {
-                        process_postgres_connection(
-                            client_socket,
-                            upstream_host,
-                            upstream_port,
-                            state.clone(),
-                            tls_acceptor,
-                        )
-                        .await
+                    async {
+                        state.active_connections.fetch_add(1, Ordering::Relaxed);
+                        let result = match protocol {
+                            DbProtocol::Postgres => {
+                                process_postgres_connection(
+                                    client_socket,
+                                    upstream_host,
+                                    upstream_port,
+                                    state.clone(),
+                                    tls_acceptor,
+                                )
+                                .await
+                            }
+                            DbProtocol::Mysql => {
+                                process_mysql_connection(
+                                    client_socket,
+                                    upstream_host,
+                                    upstream_port,
+                                    state.clone(),
+                                )
+                                .await
+                            }
+                        };
+                        state.active_connections.fetch_sub(1, Ordering::Relaxed);
+
+                        if let Err(e) = result {
+                            tracing::error!(error = %e, "Connection error");
+                        }
                     }
-                    DbProtocol::Mysql => {
-                        process_mysql_connection(
-                            client_socket,
-                            upstream_host,
-                            upstream_port,
-                            state.clone(),
-                        )
-                        .await
-                    }
-                };
-                state.active_connections.fetch_sub(1, Ordering::Relaxed);
-
-                if let Err(e) = result {
-                    tracing::error!(error = %e, "Connection error");
-                }
+                    .instrument(span)
+                    .await
+                });
             }
-            .instrument(span)
-            .await
-        });
+
+            // Wait for shutdown signal
+            _ = shutdown_signal() => {
+                info!("Shutdown signal received, stopping accept loop...");
+                break;
+            }
+        }
     }
+
+    // Graceful shutdown: wait for active connections to drain
+    info!("Waiting for {} active connections to close (timeout: {}s)...", 
+          state.active_connections.load(Ordering::Relaxed), shutdown_timeout);
+    
+    // Signal all connections to shutdown
+    cancel_token.cancel();
+
+    // Wait for connections to drain with timeout
+    let drain_start = std::time::Instant::now();
+    let timeout_duration = std::time::Duration::from_secs(shutdown_timeout);
+    
+    while state.active_connections.load(Ordering::Relaxed) > 0 {
+        if drain_start.elapsed() >= timeout_duration {
+            warn!("Shutdown timeout reached, {} connections still active", 
+                  state.active_connections.load(Ordering::Relaxed));
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    info!("Shutdown complete.");
+    Ok(())
 }
 
 // ============================================================================

@@ -110,9 +110,18 @@ wait_for_port() {
 cleanup() {
     log_section "Cleaning up..."
     
-    # Stop proxy
+    # Stop proxy gracefully with SIGTERM
     if [ -n "$PROXY_PID" ]; then
-        kill $PROXY_PID 2>/dev/null || true
+        kill -TERM $PROXY_PID 2>/dev/null || true
+        # Wait for graceful shutdown (max 5 seconds)
+        for i in {1..50}; do
+            if ! kill -0 $PROXY_PID 2>/dev/null; then
+                break
+            fi
+            sleep 0.1
+        done
+        # Force kill if still running
+        kill -9 $PROXY_PID 2>/dev/null || true
         log_info "Stopped proxy (PID: $PROXY_PID)"
     fi
     
@@ -121,6 +130,61 @@ cleanup() {
     log_info "Removed test containers"
 }
 trap cleanup EXIT
+
+#######################################
+# Graceful Shutdown Test
+#######################################
+
+test_graceful_shutdown() {
+    log_section "Test: Graceful Shutdown"
+    
+    # Start a fresh proxy instance for shutdown test
+    local shutdown_test_port=6599
+    local shutdown_api_port=3099
+    
+    ./target/release/iron-veil \
+        --port $shutdown_test_port \
+        --upstream-port $PG_PORT \
+        --api-port $shutdown_api_port \
+        --protocol postgres \
+        --shutdown-timeout 5 &
+    local test_pid=$!
+    
+    # Wait for proxy to start
+    sleep 2
+    if ! kill -0 $test_pid 2>/dev/null; then
+        log_error "Graceful shutdown test: Proxy failed to start"
+        return 1
+    fi
+    
+    # Send SIGTERM
+    kill -TERM $test_pid 2>/dev/null
+    
+    # Wait for graceful exit (should complete within shutdown timeout)
+    local waited=0
+    while kill -0 $test_pid 2>/dev/null && [ $waited -lt 10 ]; do
+        sleep 0.5
+        waited=$((waited + 1))
+    done
+    
+    # Check if process exited
+    if kill -0 $test_pid 2>/dev/null; then
+        log_error "Graceful shutdown: Process did not exit within timeout"
+        kill -9 $test_pid 2>/dev/null
+        return 1
+    fi
+    
+    # Check exit code (wait returns the exit status)
+    wait $test_pid 2>/dev/null
+    local exit_code=$?
+    
+    # Exit code 0 or 143 (128 + 15 for SIGTERM) are acceptable
+    if [ $exit_code -eq 0 ] || [ $exit_code -eq 143 ]; then
+        log_success "Graceful shutdown completed successfully (exit code: $exit_code)"
+    else
+        log_error "Graceful shutdown: Unexpected exit code $exit_code"
+    fi
+}
 
 #######################################
 # Port Conflict Check
@@ -450,6 +514,7 @@ main() {
         postgres)
             run_postgres_tests
             run_api_tests
+            test_graceful_shutdown
             ;;
         mysql)
             run_mysql_tests
@@ -458,6 +523,7 @@ main() {
             run_postgres_tests
             run_mysql_tests
             run_api_tests
+            test_graceful_shutdown
             ;;
         *)
             echo "Usage: $0 [postgres|mysql|all]"
