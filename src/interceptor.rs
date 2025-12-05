@@ -19,7 +19,24 @@ fn generate_fake_data(strategy: &str, seed: u64) -> String {
         "phone" => PhoneNumber().fake_with_rng(&mut rng),
         "address" => CityName().fake_with_rng(&mut rng),
         "credit_card" => CreditCardNumber().fake_with_rng(&mut rng),
+        "ssn" => format!("XXX-XX-{:04}", (seed % 10000)),
+        "ip" => "0.0.0.0".to_string(),
+        "dob" => "1900-01-01".to_string(),
+        "passport" => "XXXXXXXX".to_string(),
         _ => "MASKED".to_string(),
+    }
+}
+
+/// Convert PiiType to masking strategy string
+fn pii_type_to_strategy(pii_type: PiiType) -> &'static str {
+    match pii_type {
+        PiiType::Email => "email",
+        PiiType::CreditCard => "credit_card",
+        PiiType::Ssn => "ssn",
+        PiiType::Phone => "phone",
+        PiiType::IpAddress => "ip",
+        PiiType::DateOfBirth => "dob",
+        PiiType::Passport => "passport",
     }
 }
 
@@ -27,10 +44,7 @@ fn mask_json_recursively(val: &mut serde_json::Value, scanner: &PiiScanner) {
     match val {
         serde_json::Value::String(s) => {
             if let Some(pii_type) = scanner.scan(s) {
-                let strategy = match pii_type {
-                    PiiType::Email => "email",
-                    PiiType::CreditCard => "credit_card",
-                };
+                let strategy = pii_type_to_strategy(pii_type);
 
                 // Deterministic seed based on the string value
                 let mut hasher = DefaultHasher::new();
@@ -102,10 +116,7 @@ fn mask_postgres_array(raw: &str, scanner: &PiiScanner) -> Option<String> {
         let clean_val = val.replace("\\\"", "\"").replace("\\\\", "\\");
 
         if let Some(pii_type) = scanner.scan(&clean_val) {
-            let strategy = match pii_type {
-                PiiType::Email => "email",
-                PiiType::CreditCard => "credit_card",
-            };
+            let strategy = pii_type_to_strategy(pii_type);
 
             let mut hasher = DefaultHasher::new();
             clean_val.hash(&mut hasher);
@@ -290,11 +301,7 @@ impl PacketInterceptor for Anonymizer {
                             }
                         }
 
-                        match self.scanner.scan(s) {
-                            Some(PiiType::Email) => Some("email"),
-                            Some(PiiType::CreditCard) => Some("credit_card"),
-                            None => None,
-                        }
+                        self.scanner.scan(s).map(pii_type_to_strategy)
                     } else {
                         None
                     }
@@ -461,11 +468,7 @@ impl MySqlPacketInterceptor for MySqlAnonymizer {
                 } else {
                     // Heuristic scan
                     if let Ok(s) = std::str::from_utf8(val) {
-                        match self.scanner.scan(s) {
-                            Some(PiiType::Email) => Some("email"),
-                            Some(PiiType::CreditCard) => Some("credit_card"),
-                            None => None,
-                        }
+                        self.scanner.scan(s).map(pii_type_to_strategy)
                     } else {
                         None
                     }

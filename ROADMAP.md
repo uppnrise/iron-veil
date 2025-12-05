@@ -136,15 +136,19 @@ health_check:
 
 ## 🟢 Medium Priority (Nice to Have)
 
-### 12. Extended PII Detection
-- [ ] Add SSN regex pattern
-- [ ] Add phone number patterns (international)
-- [ ] Add passport number patterns
-- [ ] Add IP address detection
-- [ ] Add date of birth detection
-- [ ] Optional: NLP-based name detection
+### 12. Extended PII Detection ✅
+- [x] Add SSN regex pattern (US format: XXX-XX-XXXX)
+- [x] Add phone number patterns (US 10-digit format)
+- [x] Add passport number patterns (common alphanumeric formats)
+- [x] Add IP address detection (IPv4)
+- [x] Add date of birth detection (YYYY-MM-DD, MM/DD/YYYY, etc.)
+- [ ] Optional: NLP-based name detection (future enhancement)
 
-**Files:** `src/scanner.rs`
+**PII Types Detected:**
+- Email, Credit Card (existing)
+- SSN, Phone, IP Address, Date of Birth, Passport (new)
+
+**Files:** `src/scanner.rs`, `src/interceptor.rs`
 
 ### 13. Integration Tests
 - [ ] Add end-to-end tests with real PostgreSQL
