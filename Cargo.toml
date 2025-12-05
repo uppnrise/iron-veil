@@ -40,3 +40,7 @@ jsonwebtoken = "9"
 # Prometheus Metrics
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json"] }
+tempfile = "3"
