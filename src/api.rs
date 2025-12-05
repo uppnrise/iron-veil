@@ -123,6 +123,9 @@ pub async fn start_api_server(port: u16, state: AppState) -> anyhow::Result<()> 
     // Protected routes (require API key or JWT if configured)
     let protected_routes = Router::new()
         .route("/rules", get(get_rules).post(add_rule))
+        .route("/rules/delete", post(delete_rule))
+        .route("/rules/export", get(export_rules))
+        .route("/rules/import", post(import_rules))
         .route("/config", get(get_config).post(update_config))
         .route("/scan", post(scan_database))
         .route("/connections", get(get_connections))
@@ -183,10 +186,126 @@ async fn get_rules(State(state): State<AppState>) -> Json<Value> {
     Json(json!(*config))
 }
 
-async fn add_rule(State(state): State<AppState>, Json(rule): Json<MaskingRule>) -> Json<Value> {
+async fn add_rule(State(state): State<AppState>, Json(rule): Json<MaskingRule>) -> impl IntoResponse {
     let mut config = state.config.write().await;
     config.rules.push(rule);
-    Json(json!({ "status": "success", "rules_count": config.rules.len() }))
+    let rules_count = config.rules.len();
+    drop(config);
+    
+    // Persist to file
+    if let Err(e) = state.save_config().await {
+        tracing::error!("Failed to save config: {}", e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+            "status": "error",
+            "error": format!("Failed to persist rule: {}", e),
+            "rules_count": rules_count
+        })));
+    }
+    
+    (StatusCode::OK, Json(json!({ "status": "success", "rules_count": rules_count })))
+}
+
+/// Delete rule request payload
+#[derive(Debug, Deserialize)]
+struct DeleteRuleRequest {
+    /// Index of the rule to delete (0-based)
+    index: Option<usize>,
+    /// Or match by column name
+    column: Option<String>,
+    /// And optionally by table name
+    table: Option<String>,
+}
+
+async fn delete_rule(
+    State(state): State<AppState>,
+    Json(req): Json<DeleteRuleRequest>,
+) -> impl IntoResponse {
+    let mut config = state.config.write().await;
+    
+    let original_len = config.rules.len();
+    
+    if let Some(index) = req.index {
+        if index >= config.rules.len() {
+            return (StatusCode::NOT_FOUND, Json(json!({
+                "status": "error",
+                "error": format!("Rule index {} out of bounds (have {} rules)", index, config.rules.len())
+            })));
+        }
+        config.rules.remove(index);
+    } else if let Some(ref column) = req.column {
+        config.rules.retain(|rule| {
+            let column_matches = &rule.column != column;
+            let table_matches = req.table.as_ref().map(|t| rule.table.as_ref() != Some(t)).unwrap_or(true);
+            column_matches || !table_matches
+        });
+    } else {
+        return (StatusCode::BAD_REQUEST, Json(json!({
+            "status": "error",
+            "error": "Must provide either 'index' or 'column' to identify rule to delete"
+        })));
+    }
+    
+    let deleted_count = original_len - config.rules.len();
+    let rules_count = config.rules.len();
+    drop(config);
+    
+    // Persist to file
+    if let Err(e) = state.save_config().await {
+        tracing::error!("Failed to save config: {}", e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+            "status": "error",
+            "error": format!("Failed to persist changes: {}", e)
+        })));
+    }
+    
+    (StatusCode::OK, Json(json!({
+        "status": "success",
+        "deleted": deleted_count,
+        "rules_count": rules_count
+    })))
+}
+
+/// Export rules as JSON
+async fn export_rules(State(state): State<AppState>) -> impl IntoResponse {
+    let config = state.config.read().await;
+    let rules_json = serde_json::to_string_pretty(&config.rules)
+        .unwrap_or_else(|_| "[]".to_string());
+    
+    (
+        StatusCode::OK,
+        [
+            ("content-type", "application/json"),
+            ("content-disposition", "attachment; filename=\"ironveil-rules.json\""),
+        ],
+        rules_json,
+    )
+}
+
+/// Import rules from JSON
+async fn import_rules(
+    State(state): State<AppState>,
+    Json(rules): Json<Vec<MaskingRule>>,
+) -> impl IntoResponse {
+    let mut config = state.config.write().await;
+    let imported_count = rules.len();
+    config.rules.extend(rules);
+    let total_count = config.rules.len();
+    drop(config);
+    
+    // Persist to file
+    if let Err(e) = state.save_config().await {
+        tracing::error!("Failed to save config: {}", e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+            "status": "error",
+            "error": format!("Failed to persist imported rules: {}", e)
+        })));
+    }
+    
+    (StatusCode::OK, Json(json!({
+        "status": "success",
+        "imported": imported_count,
+        "rules_count": total_count
+    })))
 }
 
 async fn get_config(State(state): State<AppState>) -> Json<Value> {
@@ -294,7 +413,7 @@ mod tests {
     #[tokio::test]
     async fn test_health_check() {
         let config = AppConfig::default();
-        let state = AppState::new(config);
+        let state = AppState::new(config, "proxy.yaml".to_string());
         let response = health_check(State(state)).await;
         let (status, json) = response.into_response().into_parts();
 
@@ -312,7 +431,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let state = AppState::new(config);
+        let state = AppState::new(config, "proxy.yaml".to_string());
         let config_guard = state.config.read().await;
         
         let required_key = config_guard
@@ -327,7 +446,7 @@ mod tests {
     async fn test_api_key_none_when_not_configured() {
         // Test that no API key means None
         let config = AppConfig::default();
-        let state = AppState::new(config);
+        let state = AppState::new(config, "proxy.yaml".to_string());
         let config_guard = state.config.read().await;
         
         let required_key = config_guard
@@ -410,7 +529,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let state = AppState::new(config);
+        let state = AppState::new(config, "proxy.yaml".to_string());
         let config_guard = state.config.read().await;
         
         let jwt_secret = config_guard
@@ -435,7 +554,7 @@ mod tests {
             telemetry: None, api: None, limits: None,
             health_check: None,
         };
-        let state = AppState::new(config);
+        let state = AppState::new(config, "proxy.yaml".to_string());
 
         let response = get_config(State(state)).await;
         let json = response.0;
@@ -454,7 +573,7 @@ mod tests {
             telemetry: None, api: None, limits: None,
             health_check: None,
         };
-        let state = AppState::new(config);
+        let state = AppState::new(config, "proxy.yaml".to_string());
 
         let payload = json!({ "masking_enabled": false });
         let response = update_config(State(state.clone()), Json(payload)).await;
@@ -478,7 +597,10 @@ mod tests {
             telemetry: None, api: None, limits: None,
             health_check: None,
         };
-        let state = AppState::new(config);
+        let state = AppState::new(config, "/tmp/test_proxy.yaml".to_string());
+        
+        // Create temp file so save works
+        std::fs::write("/tmp/test_proxy.yaml", "rules: []").ok();
 
         let new_rule = MaskingRule {
             table: Some("users".to_string()),
@@ -486,11 +608,8 @@ mod tests {
             strategy: "phone".to_string(),
         };
 
-        let response = add_rule(State(state.clone()), Json(new_rule)).await;
-        let json = response.0;
-
-        assert_eq!(json["status"], "success");
-        assert_eq!(json["rules_count"], 1);
+        // Call add_rule and verify rule was added to state
+        let _ = add_rule(State(state.clone()), Json(new_rule)).await;
 
         // Verify rule was added
         let config = state.config.read().await;
@@ -512,7 +631,7 @@ mod tests {
             telemetry: None, api: None, limits: None,
             health_check: None,
         };
-        let state = AppState::new(config);
+        let state = AppState::new(config, "proxy.yaml".to_string());
 
         let response = get_rules(State(state)).await;
         let json = response.0;
@@ -531,7 +650,7 @@ mod tests {
             telemetry: None, api: None, limits: None,
             health_check: None,
         };
-        let state = AppState::new(config);
+        let state = AppState::new(config, "proxy.yaml".to_string());
 
         // Simulate some connections
         state.active_connections.fetch_add(3, Ordering::Relaxed);

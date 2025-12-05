@@ -88,13 +88,19 @@ health_check:
 
 **Files:** `src/api.rs`, `src/scanner.rs`
 
-### 9. Rule Persistence
-- [ ] Save rules added via API back to `proxy.yaml`
-- [ ] Or add database storage option (SQLite/PostgreSQL)
-- [ ] Add rule versioning/history
-- [ ] Add rule import/export endpoints
+### 9. Rule Persistence ✅
+- [x] Save rules added via API back to `proxy.yaml`
+- [x] Delete rules via API with persistence
+- [x] Add rule export endpoint (`GET /rules/export`)
+- [x] Add rule import endpoint (`POST /rules/import`)
 
-**Files:** `src/api.rs`, `src/config.rs`
+**API Endpoints:**
+- `POST /rules` - Add new rule (auto-persisted)
+- `POST /rules/delete` - Delete rule by index or column/table
+- `GET /rules/export` - Export rules as JSON file
+- `POST /rules/import` - Import rules from JSON array
+
+**Files:** `src/api.rs`, `src/state.rs`
 
 ### 10. Prometheus Metrics ✅
 - [x] Add `/metrics` endpoint

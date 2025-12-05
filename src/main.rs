@@ -201,7 +201,7 @@ async fn main() -> Result<()> {
     };
 
     // Initialize shared state
-    let state = AppState::new(config.clone()).with_metrics(metrics_handle);
+    let state = AppState::new(config.clone(), args.config.clone()).with_metrics(metrics_handle);
 
     // Start Management API in a separate task
     let api_port = args.api_port;

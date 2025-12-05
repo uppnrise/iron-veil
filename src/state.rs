@@ -43,6 +43,7 @@ impl Default for HealthStatus {
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<RwLock<AppConfig>>,
+    pub config_path: Arc<String>,
     pub active_connections: Arc<AtomicUsize>,
     pub logs: Arc<RwLock<VecDeque<LogEntry>>>,
     pub upstream_healthy: Arc<AtomicBool>,
@@ -51,9 +52,10 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(config: AppConfig) -> Self {
+    pub fn new(config: AppConfig, config_path: String) -> Self {
         Self {
             config: Arc::new(RwLock::new(config)),
+            config_path: Arc::new(config_path),
             active_connections: Arc::new(AtomicUsize::new(0)),
             logs: Arc::new(RwLock::new(VecDeque::with_capacity(100))),
             upstream_healthy: Arc::new(AtomicBool::new(true)),
@@ -65,6 +67,14 @@ impl AppState {
     pub fn with_metrics(mut self, handle: PrometheusHandle) -> Self {
         self.metrics_handle = Some(Arc::new(handle));
         self
+    }
+    
+    /// Save current config to the config file
+    pub async fn save_config(&self) -> Result<(), std::io::Error> {
+        let config = self.config.read().await;
+        let yaml = serde_yaml::to_string(&*config)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        std::fs::write(&*self.config_path, yaml)
     }
 
     pub async fn add_log(&self, entry: LogEntry) {
