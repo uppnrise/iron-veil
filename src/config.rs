@@ -28,6 +28,22 @@ pub struct LimitsConfig {
     /// Rate limit: max new connections per second (default: unlimited)
     #[serde(default)]
     pub connections_per_second: Option<u32>,
+    
+    /// Timeout for establishing upstream connection in seconds (default: 30)
+    #[serde(default = "default_connect_timeout")]
+    pub connect_timeout_secs: u64,
+    
+    /// Idle timeout in seconds - close connection after no activity (default: 300)
+    #[serde(default = "default_idle_timeout")]
+    pub idle_timeout_secs: u64,
+}
+
+fn default_connect_timeout() -> u64 {
+    30
+}
+
+fn default_idle_timeout() -> u64 {
+    300 // 5 minutes
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

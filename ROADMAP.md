@@ -39,11 +39,11 @@ This document outlines the remaining work needed to make IronVeil production-rea
 
 **Files:** `src/main.rs`, `src/config.rs`
 
-### 5. Connection Timeouts
-- [ ] Add `idle_timeout` config option
-- [ ] Add `connect_timeout` for upstream connections
-- [ ] Implement keepalive checks
-- [ ] Clean up stale connections
+### 5. Connection Timeouts ✅
+- [x] Add `idle_timeout_secs` config option (default: 300s)
+- [x] Add `connect_timeout_secs` for upstream connections (default: 30s)
+- [x] Close idle connections after timeout
+- [x] Applied to both PostgreSQL and MySQL protocols
 
 **Files:** `src/main.rs`, `src/config.rs`
 

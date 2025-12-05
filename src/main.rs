@@ -375,9 +375,24 @@ async fn handle_postgres_protocol<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    // Create upstream connection
-    let mut upstream_socket =
-        tokio::net::TcpStream::connect(format!("{}:{}", upstream_host, upstream_port)).await?;
+    // Get timeout configuration
+    let (connect_timeout, idle_timeout) = {
+        let config = state.config.read().await;
+        let limits = config.limits.as_ref();
+        (
+            Duration::from_secs(limits.map(|l| l.connect_timeout_secs).unwrap_or(30)),
+            Duration::from_secs(limits.map(|l| l.idle_timeout_secs).unwrap_or(300)),
+        )
+    };
+
+    // Create upstream connection with timeout
+    let mut upstream_socket = tokio::time::timeout(
+        connect_timeout,
+        tokio::net::TcpStream::connect(format!("{}:{}", upstream_host, upstream_port)),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("Upstream connection timeout after {:?}", connect_timeout))?
+    ?;
 
     // Check if upstream TLS is enabled
     let upstream_tls_enabled = {
@@ -415,7 +430,7 @@ where
             let upstream_tls_stream = connector.connect(domain, upstream_socket).await?;
 
             // 4. Continue with TLS stream
-            return handle_postgres_protocol_inner(client_socket, upstream_tls_stream, state).await;
+            return handle_postgres_protocol_inner(client_socket, upstream_tls_stream, state, idle_timeout).await;
         } else {
             tracing::warn!(
                 "Upstream denied SSLRequest. Falling back to cleartext (or aborting if strict)."
@@ -425,13 +440,14 @@ where
     }
 
     // Cleartext connection
-    handle_postgres_protocol_inner(client_socket, upstream_socket, state).await
+    handle_postgres_protocol_inner(client_socket, upstream_socket, state, idle_timeout).await
 }
 
 async fn handle_postgres_protocol_inner<S, U>(
     client_socket: S,
     upstream_socket: U,
     state: AppState,
+    idle_timeout: Duration,
 ) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -510,6 +526,11 @@ where
                     None => return Ok(()), // Upstream disconnected
                 }
             }
+            // Idle timeout
+            _ = tokio::time::sleep(idle_timeout) => {
+                info!("Connection idle timeout after {:?}", idle_timeout);
+                return Ok(());
+            }
         }
     }
 }
@@ -524,17 +545,33 @@ async fn process_mysql_connection(
     upstream_port: u16,
     state: AppState,
 ) -> Result<()> {
-    // Connect to upstream MySQL server
-    let upstream_socket =
-        tokio::net::TcpStream::connect(format!("{}:{}", upstream_host, upstream_port)).await?;
+    // Get timeout configuration
+    let (connect_timeout, idle_timeout) = {
+        let config = state.config.read().await;
+        let limits = config.limits.as_ref();
+        (
+            Duration::from_secs(limits.map(|l| l.connect_timeout_secs).unwrap_or(30)),
+            Duration::from_secs(limits.map(|l| l.idle_timeout_secs).unwrap_or(300)),
+        )
+    };
 
-    handle_mysql_protocol(client_socket, upstream_socket, state).await
+    // Connect to upstream MySQL server with timeout
+    let upstream_socket = tokio::time::timeout(
+        connect_timeout,
+        tokio::net::TcpStream::connect(format!("{}:{}", upstream_host, upstream_port)),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("Upstream connection timeout after {:?}", connect_timeout))?
+    ?;
+
+    handle_mysql_protocol(client_socket, upstream_socket, state, idle_timeout).await
 }
 
 async fn handle_mysql_protocol<S, U>(
     client_socket: S,
     upstream_socket: U,
     state: AppState,
+    idle_timeout: Duration,
 ) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -667,6 +704,11 @@ where
                     Some(Err(e)) => return Err(e),
                     None => return Ok(()),
                 }
+            }
+            // Idle timeout
+            _ = tokio::time::sleep(idle_timeout) => {
+                info!("MySQL connection idle timeout after {:?}", idle_timeout);
+                return Ok(());
             }
         }
     }

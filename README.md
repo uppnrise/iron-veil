@@ -102,6 +102,8 @@ api:
 limits:
   max_connections: 1000  # Optional: max concurrent connections
   connections_per_second: 100  # Optional: rate limit for new connections
+  connect_timeout_secs: 30  # Upstream connection timeout (default: 30)
+  idle_timeout_secs: 300  # Idle connection timeout (default: 300)
 
 # Masking Rules
 rules:

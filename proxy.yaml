@@ -31,6 +31,12 @@ limits:
   
   # Rate limit: max new connections per second (default: unlimited)
   # connections_per_second: 100
+  
+  # Timeout for establishing upstream connection in seconds (default: 30)
+  # connect_timeout_secs: 30
+  
+  # Idle timeout - close connection after no activity in seconds (default: 300)
+  # idle_timeout_secs: 300
 
 rules:
   - table: "users"
