@@ -69,6 +69,7 @@ Options:
       --api-port <API_PORT>            Management API port [default: 3001]
       --protocol <PROTOCOL>            Database protocol to proxy [default: postgres]
                                        [possible values: postgres, mysql]
+      --shutdown-timeout <SECONDS>     Graceful shutdown timeout [default: 30]
   -h, --help                           Print help
   -V, --version                        Print version
 ```

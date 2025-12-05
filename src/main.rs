@@ -140,7 +140,9 @@ async fn main() -> Result<()> {
     let api_port = args.api_port;
     let api_state = state.clone();
     tokio::spawn(async move {
-        api::start_api_server(api_port, api_state).await;
+        if let Err(e) = api::start_api_server(api_port, api_state).await {
+            tracing::error!("API server error: {}", e);
+        }
     });
 
     info!("Starting DB Proxy on port {}", args.port);
@@ -259,8 +261,16 @@ async fn process_postgres_connection(
     let mut buffer = [0u8; 8];
     let n = client_socket.peek(&mut buffer).await?;
     if n >= 8 {
-        let len = u32::from_be_bytes(buffer[0..4].try_into().unwrap());
-        let code = u32::from_be_bytes(buffer[4..8].try_into().unwrap());
+        let len = u32::from_be_bytes(
+            buffer[0..4]
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("Invalid startup message length"))?,
+        );
+        let code = u32::from_be_bytes(
+            buffer[4..8]
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("Invalid startup message code"))?,
+        );
 
         if len == 8 && code == 80877103 {
             // It is an SSLRequest

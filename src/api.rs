@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
-pub async fn start_api_server(port: u16, state: AppState) {
+pub async fn start_api_server(port: u16, state: AppState) -> anyhow::Result<()> {
     // Define the routes
     let app = Router::new()
         .route("/health", get(health_check))
@@ -28,8 +28,13 @@ pub async fn start_api_server(port: u16, state: AppState) {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!("Management API listening on {}", addr);
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to bind API server to {}: {}", addr, e))?;
+    axum::serve(listener, app)
+        .await
+        .map_err(|e| anyhow::anyhow!("API server error: {}", e))?;
+    Ok(())
 }
 
 async fn health_check() -> Json<Value> {
