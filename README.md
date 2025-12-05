@@ -93,6 +93,10 @@ telemetry:
   otlp_endpoint: "http://localhost:4317"
   service_name: "iron-veil"
 
+# Management API Security
+api:
+  api_key: "your-secret-key"  # Optional: protects /rules, /config, /scan endpoints
+
 # Masking Rules
 rules:
   - table: "users"        # Table-specific rule

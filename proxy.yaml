@@ -12,6 +12,13 @@ telemetry:
   otlp_endpoint: "http://localhost:4317"
   service_name: "iron-veil"
 
+# Management API Configuration
+api:
+  # API key for authenticating management API requests.
+  # If set, all sensitive endpoints require `X-API-Key` header.
+  # Uncomment and set a secure key for production use:
+  # api_key: "your-secure-api-key-here"
+
 rules:
   - table: "users"
     column: "email"

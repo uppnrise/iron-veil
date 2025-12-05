@@ -2,7 +2,11 @@ use crate::config::MaskingRule;
 use crate::state::AppState;
 use axum::{
     Json, Router,
+    body::Body,
     extract::State,
+    http::{Request, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use serde_json::{Value, json};
@@ -11,16 +15,72 @@ use std::sync::atomic::Ordering;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
+/// Middleware to validate API key for protected endpoints
+async fn api_key_auth(
+    State(state): State<AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let config = state.config.read().await;
+    
+    // Check if API key authentication is enabled
+    let required_key = config
+        .api
+        .as_ref()
+        .and_then(|api| api.api_key.as_ref());
+    
+    match required_key {
+        Some(expected_key) => {
+            // API key is required - validate header
+            let provided_key = request
+                .headers()
+                .get("X-API-Key")
+                .and_then(|v| v.to_str().ok());
+            
+            match provided_key {
+                Some(key) if key == expected_key => {
+                    drop(config); // Release lock before calling next
+                    next.run(request).await
+                }
+                Some(_) => {
+                    (StatusCode::UNAUTHORIZED, Json(json!({
+                        "error": "Invalid API key"
+                    }))).into_response()
+                }
+                None => {
+                    (StatusCode::UNAUTHORIZED, Json(json!({
+                        "error": "Missing X-API-Key header"
+                    }))).into_response()
+                }
+            }
+        }
+        None => {
+            // No API key configured - allow all requests
+            drop(config);
+            next.run(request).await
+        }
+    }
+}
+
 pub async fn start_api_server(port: u16, state: AppState) -> anyhow::Result<()> {
-    // Define the routes
-    let app = Router::new()
-        .route("/health", get(health_check))
+    // Public routes (no auth required)
+    let public_routes = Router::new()
+        .route("/health", get(health_check));
+    
+    // Protected routes (require API key if configured)
+    let protected_routes = Router::new()
         .route("/rules", get(get_rules).post(add_rule))
         .route("/config", get(get_config).post(update_config))
         .route("/scan", post(scan_database))
         .route("/connections", get(get_connections))
         .route("/schema", get(get_schema))
         .route("/logs", get(get_logs))
+        .layer(middleware::from_fn_with_state(state.clone(), api_key_auth));
+    
+    // Combine routes
+    let app = Router::new()
+        .merge(public_routes)
+        .merge(protected_routes)
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(state);
@@ -136,7 +196,7 @@ async fn get_logs(State(state): State<AppState>) -> Json<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AppConfig;
+    use crate::config::{ApiConfig, AppConfig};
 
     #[tokio::test]
     async fn test_health_check() {
@@ -146,6 +206,41 @@ mod tests {
         assert_eq!(json["status"], "ok");
         assert_eq!(json["service"], "ironveil");
         assert!(json["version"].is_string());
+    }
+
+    #[tokio::test]
+    async fn test_api_key_config_parsing() {
+        // Test that API key is correctly parsed from config
+        let config = AppConfig {
+            api: Some(ApiConfig {
+                api_key: Some("my-secret-key".to_string()),
+            }),
+            ..Default::default()
+        };
+        let state = AppState::new(config);
+        let config_guard = state.config.read().await;
+        
+        let required_key = config_guard
+            .api
+            .as_ref()
+            .and_then(|api| api.api_key.as_ref());
+        
+        assert_eq!(required_key, Some(&"my-secret-key".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_api_key_none_when_not_configured() {
+        // Test that no API key means None
+        let config = AppConfig::default();
+        let state = AppState::new(config);
+        let config_guard = state.config.read().await;
+        
+        let required_key = config_guard
+            .api
+            .as_ref()
+            .and_then(|api| api.api_key.as_ref());
+        
+        assert_eq!(required_key, None);
     }
 
     #[tokio::test]
@@ -159,7 +254,7 @@ mod tests {
             }],
             tls: None,
             upstream_tls: false,
-            telemetry: None,
+            telemetry: None, api: None,
         };
         let state = AppState::new(config);
 
@@ -177,7 +272,7 @@ mod tests {
             rules: vec![],
             tls: None,
             upstream_tls: false,
-            telemetry: None,
+            telemetry: None, api: None,
         };
         let state = AppState::new(config);
 
@@ -200,7 +295,7 @@ mod tests {
             rules: vec![],
             tls: None,
             upstream_tls: false,
-            telemetry: None,
+            telemetry: None, api: None,
         };
         let state = AppState::new(config);
 
@@ -233,7 +328,7 @@ mod tests {
             }],
             tls: None,
             upstream_tls: false,
-            telemetry: None,
+            telemetry: None, api: None,
         };
         let state = AppState::new(config);
 
@@ -251,7 +346,7 @@ mod tests {
             rules: vec![],
             tls: None,
             upstream_tls: false,
-            telemetry: None,
+            telemetry: None, api: None,
         };
         let state = AppState::new(config);
 

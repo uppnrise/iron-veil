@@ -13,6 +13,16 @@ pub struct AppConfig {
     pub upstream_tls: bool,
     #[serde(default)]
     pub telemetry: Option<TelemetryConfig>,
+    #[serde(default)]
+    pub api: Option<ApiConfig>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ApiConfig {
+    /// API key for authenticating management API requests.
+    /// If set, all sensitive endpoints require `X-API-Key` header.
+    #[serde(default)]
+    pub api_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -49,6 +59,19 @@ pub struct MaskingRule {
     pub table: Option<String>,
     pub column: String,
     pub strategy: String,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            masking_enabled: true,
+            rules: vec![],
+            tls: None,
+            upstream_tls: false,
+            telemetry: None,
+            api: None,
+        }
+    }
 }
 
 impl AppConfig {
