@@ -96,13 +96,26 @@ health_check:
 
 **Files:** `src/api.rs`, `src/config.rs`
 
-### 10. Prometheus Metrics
-- [ ] Add `/metrics` endpoint
-- [ ] Track: connections, queries, masked fields, latency
-- [ ] Integrate with `opentelemetry` metrics
-- [ ] Add Grafana dashboard template
+### 10. Prometheus Metrics ✅
+- [x] Add `/metrics` endpoint
+- [x] Track: connections (opened/closed/rejected), queries, masked fields, latency
+- [x] Integrate with `metrics` and `metrics-exporter-prometheus` crates
+- [ ] Add Grafana dashboard template (future enhancement)
 
-**Files:** `src/api.rs`, `src/telemetry.rs`
+**Metrics Exposed:**
+- `ironveil_connections_total` - Total connections received
+- `ironveil_connections_active` - Currently active connections
+- `ironveil_connections_rejected_total` - Rejected connections (by reason)
+- `ironveil_queries_total` - Total queries processed (by protocol)
+- `ironveil_query_duration_seconds` - Query processing latency histogram
+- `ironveil_fields_masked_total` - Total PII fields masked
+- `ironveil_masking_errors_total` - Masking errors encountered
+- `ironveil_upstream_health_check_latency_ms` - Health check latency
+- `ironveil_upstream_healthy` - Upstream health status (0/1)
+- `ironveil_upstream_timeouts_total` - Upstream connection timeouts
+- `ironveil_idle_timeouts_total` - Idle connection timeouts
+
+**Files:** `src/metrics.rs` (new), `src/api.rs`, `src/state.rs`, `Cargo.toml`
 
 ### 11. Frontend Dynamic Version ✅
 - [x] Fetch version from `/health` endpoint (already implemented)

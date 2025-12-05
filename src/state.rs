@@ -1,5 +1,6 @@
 use crate::config::AppConfig;
 use chrono::{DateTime, Utc};
+use metrics_exporter_prometheus::PrometheusHandle;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::{Arc, atomic::{AtomicUsize, AtomicBool, Ordering}};
@@ -46,6 +47,7 @@ pub struct AppState {
     pub logs: Arc<RwLock<VecDeque<LogEntry>>>,
     pub upstream_healthy: Arc<AtomicBool>,
     pub health_status: Arc<RwLock<HealthStatus>>,
+    pub metrics_handle: Option<Arc<PrometheusHandle>>,
 }
 
 impl AppState {
@@ -56,7 +58,13 @@ impl AppState {
             logs: Arc::new(RwLock::new(VecDeque::with_capacity(100))),
             upstream_healthy: Arc::new(AtomicBool::new(true)),
             health_status: Arc::new(RwLock::new(HealthStatus::default())),
+            metrics_handle: None,
         }
+    }
+    
+    pub fn with_metrics(mut self, handle: PrometheusHandle) -> Self {
+        self.metrics_handle = Some(Arc::new(handle));
+        self
     }
 
     pub async fn add_log(&self, entry: LogEntry) {

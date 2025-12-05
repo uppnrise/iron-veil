@@ -8,6 +8,7 @@ use tracing::{Instrument, info, info_span, warn};
 mod api;
 mod config;
 mod interceptor;
+mod metrics;
 mod protocol;
 mod scanner;
 mod state;
@@ -175,6 +176,10 @@ async fn main() -> Result<()> {
         config.rules.len(),
         args.config
     );
+    
+    // Initialize Prometheus metrics
+    let metrics_handle = metrics::init_metrics();
+    info!("Prometheus metrics initialized");
 
     // Load TLS config if enabled
     let tls_acceptor = if let Some(tls_config) = &config.tls {
@@ -196,7 +201,7 @@ async fn main() -> Result<()> {
     };
 
     // Initialize shared state
-    let state = AppState::new(config.clone());
+    let state = AppState::new(config.clone()).with_metrics(metrics_handle);
 
     // Start Management API in a separate task
     let api_port = args.api_port;

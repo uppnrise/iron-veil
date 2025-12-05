@@ -36,3 +36,7 @@ tracing-opentelemetry = "0.28"
 
 # JWT Authentication
 jsonwebtoken = "9"
+
+# Prometheus Metrics
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"

@@ -117,7 +117,8 @@ async fn api_auth(
 pub async fn start_api_server(port: u16, state: AppState) -> anyhow::Result<()> {
     // Public routes (no auth required)
     let public_routes = Router::new()
-        .route("/health", get(health_check));
+        .route("/health", get(health_check))
+        .route("/metrics", get(get_metrics));
     
     // Protected routes (require API key or JWT if configured)
     let protected_routes = Router::new()
@@ -263,6 +264,25 @@ async fn get_logs(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "logs": *logs
     }))
+}
+
+/// Prometheus metrics endpoint
+async fn get_metrics(State(state): State<AppState>) -> impl IntoResponse {
+    match &state.metrics_handle {
+        Some(handle) => {
+            let metrics = handle.render();
+            (
+                StatusCode::OK,
+                [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
+                metrics,
+            )
+        }
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("content-type", "text/plain; charset=utf-8")],
+            "Metrics not enabled".to_string(),
+        ),
+    }
 }
 
 #[cfg(test)]

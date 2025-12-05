@@ -163,6 +163,7 @@ iron-veil/
 │   ├── scanner.rs       # PII regex scanner
 │   ├── interceptor.rs   # Anonymizer implementations (PG + MySQL)
 │   ├── telemetry.rs     # OpenTelemetry setup
+│   ├── metrics.rs       # Prometheus metrics
 │   └── protocol/
 │       ├── mod.rs
 │       ├── postgres.rs  # PostgreSQL wire protocol codec
@@ -170,6 +171,33 @@ iron-veil/
 ├── web/                 # Next.js dashboard
 ├── proxy.yaml           # Configuration file
 └── docker-compose.yml   # Full stack deployment
+```
+
+## Monitoring
+
+### Prometheus Metrics
+
+Metrics are exposed at `http://localhost:3001/metrics`:
+
+```
+# Connection metrics
+ironveil_connections_total
+ironveil_connections_active
+ironveil_connections_rejected_total{reason="rate_limit|max_connections"}
+
+# Query metrics
+ironveil_queries_total{protocol="postgres|mysql"}
+ironveil_query_duration_seconds{protocol="postgres|mysql"}
+
+# Masking metrics
+ironveil_fields_masked_total
+ironveil_masking_errors_total
+
+# Health metrics
+ironveil_upstream_healthy
+ironveil_upstream_health_check_latency_ms
+ironveil_upstream_timeouts_total
+ironveil_idle_timeouts_total
 ```
 
 ## Development
