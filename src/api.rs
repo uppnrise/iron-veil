@@ -9,7 +9,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use jsonwebtoken::{decode, DecodingKey, Validation, Algorithm};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::net::SocketAddr;
@@ -34,71 +34,72 @@ fn validate_jwt(token: &str, secret: &str) -> Result<Claims, jsonwebtoken::error
     let decoding_key = DecodingKey::from_secret(secret.as_bytes());
     let mut validation = Validation::new(Algorithm::HS256);
     validation.validate_exp = true;
-    
+
     let token_data = decode::<Claims>(token, &decoding_key, &validation)?;
     Ok(token_data.claims)
 }
 
 /// Middleware to validate API key or JWT for protected endpoints
-async fn api_auth(
-    State(state): State<AppState>,
-    request: Request<Body>,
-    next: Next,
-) -> Response {
+async fn api_auth(State(state): State<AppState>, request: Request<Body>, next: Next) -> Response {
     let config = state.config.read().await;
-    
+
     let api_config = config.api.as_ref();
     let api_key = api_config.and_then(|c| c.api_key.as_ref());
     let jwt_secret = api_config.and_then(|c| c.jwt_secret.as_ref());
-    
+
     // If neither API key nor JWT is configured, allow all requests
     if api_key.is_none() && jwt_secret.is_none() {
         drop(config);
         return next.run(request).await;
     }
-    
+
     // Try API key authentication first
-    if let Some(expected_key) = api_key {
-        if let Some(provided_key) = request
+    if let Some(expected_key) = api_key
+        && let Some(provided_key) = request
             .headers()
             .get("X-API-Key")
             .and_then(|v| v.to_str().ok())
-        {
-            if provided_key == expected_key {
-                drop(config);
-                return next.run(request).await;
-            } else {
-                return (StatusCode::UNAUTHORIZED, Json(json!({
+    {
+        if provided_key == expected_key {
+            drop(config);
+            return next.run(request).await;
+        } else {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({
                     "error": "Invalid API key"
-                }))).into_response();
-            }
+                })),
+            )
+                .into_response();
         }
     }
-    
+
     // Try JWT authentication
-    if let Some(secret) = jwt_secret {
-        if let Some(auth_header) = request
+    if let Some(secret) = jwt_secret
+        && let Some(auth_header) = request
             .headers()
             .get("Authorization")
             .and_then(|v| v.to_str().ok())
-        {
-            if let Some(token) = auth_header.strip_prefix("Bearer ") {
-                match validate_jwt(token, secret) {
-                    Ok(_claims) => {
-                        drop(config);
-                        return next.run(request).await;
-                    }
-                    Err(e) => {
-                        tracing::debug!("JWT validation failed: {}", e);
-                        return (StatusCode::UNAUTHORIZED, Json(json!({
-                            "error": "Invalid or expired JWT token"
-                        }))).into_response();
-                    }
-                }
+        && let Some(token) = auth_header.strip_prefix("Bearer ")
+    {
+        match validate_jwt(token, secret) {
+            Ok(_claims) => {
+                drop(config);
+                return next.run(request).await;
+            }
+            Err(e) => {
+                tracing::debug!("JWT validation failed: {}", e);
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({
+                        "error": "Invalid or expired JWT token"
+                    })),
+                )
+                    .into_response();
             }
         }
     }
-    
+
     // No valid authentication provided
     let auth_methods: Vec<&str> = [
         api_key.map(|_| "X-API-Key header"),
@@ -107,11 +108,15 @@ async fn api_auth(
     .into_iter()
     .flatten()
     .collect();
-    
-    (StatusCode::UNAUTHORIZED, Json(json!({
-        "error": "Authentication required",
-        "methods": auth_methods
-    }))).into_response()
+
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({
+            "error": "Authentication required",
+            "methods": auth_methods
+        })),
+    )
+        .into_response()
 }
 
 pub async fn start_api_server(port: u16, state: AppState) -> anyhow::Result<()> {
@@ -119,7 +124,7 @@ pub async fn start_api_server(port: u16, state: AppState) -> anyhow::Result<()> 
     let public_routes = Router::new()
         .route("/health", get(health_check))
         .route("/metrics", get(get_metrics));
-    
+
     // Protected routes (require API key or JWT if configured)
     let protected_routes = Router::new()
         .route("/rules", get(get_rules).post(add_rule))
@@ -133,7 +138,7 @@ pub async fn start_api_server(port: u16, state: AppState) -> anyhow::Result<()> 
         .route("/schema", get(get_schema))
         .route("/logs", get(get_logs))
         .layer(middleware::from_fn_with_state(state.clone(), api_auth));
-    
+
     // Combine routes
     let app = Router::new()
         .merge(public_routes)
@@ -157,7 +162,7 @@ pub async fn start_api_server(port: u16, state: AppState) -> anyhow::Result<()> 
 async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
     let health_status = state.health_status.read().await;
     let active_connections = state.active_connections.load(Ordering::Relaxed);
-    
+
     let response = json!({
         "status": if health_status.healthy { "ok" } else { "degraded" },
         "service": "ironveil",
@@ -174,7 +179,7 @@ async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
             "active": active_connections
         }
     });
-    
+
     if health_status.healthy {
         (StatusCode::OK, Json(response))
     } else {
@@ -187,23 +192,32 @@ async fn get_rules(State(state): State<AppState>) -> Json<Value> {
     Json(json!(*config))
 }
 
-async fn add_rule(State(state): State<AppState>, Json(rule): Json<MaskingRule>) -> impl IntoResponse {
+async fn add_rule(
+    State(state): State<AppState>,
+    Json(rule): Json<MaskingRule>,
+) -> impl IntoResponse {
     let mut config = state.config.write().await;
     config.rules.push(rule);
     let rules_count = config.rules.len();
     drop(config);
-    
+
     // Persist to file
     if let Err(e) = state.save_config().await {
         tracing::error!("Failed to save config: {}", e);
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-            "status": "error",
-            "error": format!("Failed to persist rule: {}", e),
-            "rules_count": rules_count
-        })));
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "status": "error",
+                "error": format!("Failed to persist rule: {}", e),
+                "rules_count": rules_count
+            })),
+        );
     }
-    
-    (StatusCode::OK, Json(json!({ "status": "success", "rules_count": rules_count })))
+
+    (
+        StatusCode::OK,
+        Json(json!({ "status": "success", "rules_count": rules_count })),
+    )
 }
 
 /// Delete rule request payload
@@ -222,61 +236,80 @@ async fn delete_rule(
     Json(req): Json<DeleteRuleRequest>,
 ) -> impl IntoResponse {
     let mut config = state.config.write().await;
-    
+
     let original_len = config.rules.len();
-    
+
     if let Some(index) = req.index {
         if index >= config.rules.len() {
-            return (StatusCode::NOT_FOUND, Json(json!({
-                "status": "error",
-                "error": format!("Rule index {} out of bounds (have {} rules)", index, config.rules.len())
-            })));
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "status": "error",
+                    "error": format!("Rule index {} out of bounds (have {} rules)", index, config.rules.len())
+                })),
+            );
         }
         config.rules.remove(index);
     } else if let Some(ref column) = req.column {
         config.rules.retain(|rule| {
             let column_matches = &rule.column != column;
-            let table_matches = req.table.as_ref().map(|t| rule.table.as_ref() != Some(t)).unwrap_or(true);
+            let table_matches = req
+                .table
+                .as_ref()
+                .map(|t| rule.table.as_ref() != Some(t))
+                .unwrap_or(true);
             column_matches || !table_matches
         });
     } else {
-        return (StatusCode::BAD_REQUEST, Json(json!({
-            "status": "error",
-            "error": "Must provide either 'index' or 'column' to identify rule to delete"
-        })));
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "status": "error",
+                "error": "Must provide either 'index' or 'column' to identify rule to delete"
+            })),
+        );
     }
-    
+
     let deleted_count = original_len - config.rules.len();
     let rules_count = config.rules.len();
     drop(config);
-    
+
     // Persist to file
     if let Err(e) = state.save_config().await {
         tracing::error!("Failed to save config: {}", e);
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-            "status": "error",
-            "error": format!("Failed to persist changes: {}", e)
-        })));
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "status": "error",
+                "error": format!("Failed to persist changes: {}", e)
+            })),
+        );
     }
-    
-    (StatusCode::OK, Json(json!({
-        "status": "success",
-        "deleted": deleted_count,
-        "rules_count": rules_count
-    })))
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "success",
+            "deleted": deleted_count,
+            "rules_count": rules_count
+        })),
+    )
 }
 
 /// Export rules as JSON
 async fn export_rules(State(state): State<AppState>) -> impl IntoResponse {
     let config = state.config.read().await;
-    let rules_json = serde_json::to_string_pretty(&config.rules)
-        .unwrap_or_else(|_| "[]".to_string());
-    
+    let rules_json =
+        serde_json::to_string_pretty(&config.rules).unwrap_or_else(|_| "[]".to_string());
+
     (
         StatusCode::OK,
         [
             ("content-type", "application/json"),
-            ("content-disposition", "attachment; filename=\"ironveil-rules.json\""),
+            (
+                "content-disposition",
+                "attachment; filename=\"ironveil-rules.json\"",
+            ),
         ],
         rules_json,
     )
@@ -292,21 +325,27 @@ async fn import_rules(
     config.rules.extend(rules);
     let total_count = config.rules.len();
     drop(config);
-    
+
     // Persist to file
     if let Err(e) = state.save_config().await {
         tracing::error!("Failed to save config: {}", e);
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-            "status": "error",
-            "error": format!("Failed to persist imported rules: {}", e)
-        })));
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "status": "error",
+                "error": format!("Failed to persist imported rules: {}", e)
+            })),
+        );
     }
-    
-    (StatusCode::OK, Json(json!({
-        "status": "success",
-        "imported": imported_count,
-        "rules_count": total_count
-    })))
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "success",
+            "imported": imported_count,
+            "rules_count": total_count
+        })),
+    )
 }
 
 async fn get_config(State(state): State<AppState>) -> Json<Value> {
@@ -328,15 +367,21 @@ async fn update_config(State(state): State<AppState>, Json(payload): Json<Value>
 /// Reload configuration from disk
 async fn reload_config(State(state): State<AppState>) -> impl IntoResponse {
     match state.reload_config().await {
-        Ok(rules_count) => (StatusCode::OK, Json(json!({
-            "status": "success",
-            "message": "Configuration reloaded successfully",
-            "rules_count": rules_count
-        }))),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-            "status": "error",
-            "error": e
-        }))),
+        Ok(rules_count) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "success",
+                "message": "Configuration reloaded successfully",
+                "rules_count": rules_count
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "status": "error",
+                "error": e
+            })),
+        ),
     }
 }
 
@@ -431,7 +476,7 @@ mod tests {
         let config = AppConfig::default();
         let state = AppState::new(config, "proxy.yaml".to_string());
         let response = health_check(State(state)).await;
-        let (status, json) = response.into_response().into_parts();
+        let (status, _json) = response.into_response().into_parts();
 
         // For default state (healthy), we should get 200 OK
         assert_eq!(status.status, StatusCode::OK);
@@ -449,12 +494,12 @@ mod tests {
         };
         let state = AppState::new(config, "proxy.yaml".to_string());
         let config_guard = state.config.read().await;
-        
+
         let required_key = config_guard
             .api
             .as_ref()
             .and_then(|api| api.api_key.as_ref());
-        
+
         assert_eq!(required_key, Some(&"my-secret-key".to_string()));
     }
 
@@ -464,32 +509,33 @@ mod tests {
         let config = AppConfig::default();
         let state = AppState::new(config, "proxy.yaml".to_string());
         let config_guard = state.config.read().await;
-        
+
         let required_key = config_guard
             .api
             .as_ref()
             .and_then(|api| api.api_key.as_ref());
-        
+
         assert_eq!(required_key, None);
     }
 
     #[tokio::test]
     async fn test_jwt_validation_valid_token() {
-        use jsonwebtoken::{encode, EncodingKey, Header};
-        
+        use jsonwebtoken::{EncodingKey, Header, encode};
+
         let secret = "test-jwt-secret";
         let claims = Claims {
             sub: "test-user".to_string(),
             exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as usize,
             iat: chrono::Utc::now().timestamp() as usize,
         };
-        
+
         let token = encode(
             &Header::default(),
             &claims,
             &EncodingKey::from_secret(secret.as_bytes()),
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         let result = validate_jwt(&token, secret);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().sub, "test-user");
@@ -497,41 +543,43 @@ mod tests {
 
     #[tokio::test]
     async fn test_jwt_validation_expired_token() {
-        use jsonwebtoken::{encode, EncodingKey, Header};
-        
+        use jsonwebtoken::{EncodingKey, Header, encode};
+
         let secret = "test-jwt-secret";
         let claims = Claims {
             sub: "test-user".to_string(),
             exp: (chrono::Utc::now() - chrono::Duration::hours(1)).timestamp() as usize,
             iat: (chrono::Utc::now() - chrono::Duration::hours(2)).timestamp() as usize,
         };
-        
+
         let token = encode(
             &Header::default(),
             &claims,
             &EncodingKey::from_secret(secret.as_bytes()),
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         let result = validate_jwt(&token, secret);
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_jwt_validation_wrong_secret() {
-        use jsonwebtoken::{encode, EncodingKey, Header};
-        
+        use jsonwebtoken::{EncodingKey, Header, encode};
+
         let claims = Claims {
             sub: "test-user".to_string(),
             exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as usize,
             iat: chrono::Utc::now().timestamp() as usize,
         };
-        
+
         let token = encode(
             &Header::default(),
             &claims,
             &EncodingKey::from_secret(b"correct-secret"),
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         let result = validate_jwt(&token, "wrong-secret");
         assert!(result.is_err());
     }
@@ -547,12 +595,12 @@ mod tests {
         };
         let state = AppState::new(config, "proxy.yaml".to_string());
         let config_guard = state.config.read().await;
-        
+
         let jwt_secret = config_guard
             .api
             .as_ref()
             .and_then(|api| api.jwt_secret.as_ref());
-        
+
         assert_eq!(jwt_secret, Some(&"my-jwt-secret".to_string()));
     }
 
@@ -567,7 +615,9 @@ mod tests {
             }],
             tls: None,
             upstream_tls: false,
-            telemetry: None, api: None, limits: None,
+            telemetry: None,
+            api: None,
+            limits: None,
             health_check: None,
         };
         let state = AppState::new(config, "proxy.yaml".to_string());
@@ -586,7 +636,9 @@ mod tests {
             rules: vec![],
             tls: None,
             upstream_tls: false,
-            telemetry: None, api: None, limits: None,
+            telemetry: None,
+            api: None,
+            limits: None,
             health_check: None,
         };
         let state = AppState::new(config, "proxy.yaml".to_string());
@@ -610,11 +662,13 @@ mod tests {
             rules: vec![],
             tls: None,
             upstream_tls: false,
-            telemetry: None, api: None, limits: None,
+            telemetry: None,
+            api: None,
+            limits: None,
             health_check: None,
         };
         let state = AppState::new(config, "/tmp/test_proxy.yaml".to_string());
-        
+
         // Create temp file so save works
         std::fs::write("/tmp/test_proxy.yaml", "rules: []").ok();
 
@@ -644,7 +698,9 @@ mod tests {
             }],
             tls: None,
             upstream_tls: false,
-            telemetry: None, api: None, limits: None,
+            telemetry: None,
+            api: None,
+            limits: None,
             health_check: None,
         };
         let state = AppState::new(config, "proxy.yaml".to_string());
@@ -663,7 +719,9 @@ mod tests {
             rules: vec![],
             tls: None,
             upstream_tls: false,
-            telemetry: None, api: None, limits: None,
+            telemetry: None,
+            api: None,
+            limits: None,
             health_check: None,
         };
         let state = AppState::new(config, "proxy.yaml".to_string());

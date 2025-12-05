@@ -26,15 +26,15 @@ pub struct LimitsConfig {
     /// Maximum number of concurrent connections (default: unlimited)
     #[serde(default)]
     pub max_connections: Option<usize>,
-    
+
     /// Rate limit: max new connections per second (default: unlimited)
     #[serde(default)]
     pub connections_per_second: Option<u32>,
-    
+
     /// Timeout for establishing upstream connection in seconds (default: 30)
     #[serde(default = "default_connect_timeout")]
     pub connect_timeout_secs: u64,
-    
+
     /// Idle timeout in seconds - close connection after no activity (default: 300)
     #[serde(default = "default_idle_timeout")]
     pub idle_timeout_secs: u64,
@@ -54,19 +54,19 @@ pub struct HealthCheckConfig {
     /// Enable upstream health checks (default: true)
     #[serde(default = "default_health_enabled")]
     pub enabled: bool,
-    
+
     /// Interval between health checks in seconds (default: 10)
     #[serde(default = "default_health_interval")]
     pub interval_secs: u64,
-    
+
     /// Timeout for health check connection in seconds (default: 5)
     #[serde(default = "default_health_timeout")]
     pub timeout_secs: u64,
-    
+
     /// Number of consecutive failures before marking unhealthy (default: 3)
     #[serde(default = "default_unhealthy_threshold")]
     pub unhealthy_threshold: u32,
-    
+
     /// Number of consecutive successes before marking healthy (default: 1)
     #[serde(default = "default_healthy_threshold")]
     pub healthy_threshold: u32,
@@ -110,7 +110,7 @@ pub struct ApiConfig {
     /// If set, all sensitive endpoints require `X-API-Key` header.
     #[serde(default)]
     pub api_key: Option<String>,
-    
+
     /// JWT secret for token-based authentication.
     /// If set, endpoints also accept `Authorization: Bearer <token>` header.
     #[serde(default)]

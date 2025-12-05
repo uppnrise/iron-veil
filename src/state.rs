@@ -3,7 +3,10 @@ use chrono::{DateTime, Utc};
 use metrics_exporter_prometheus::PrometheusHandle;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use std::sync::{Arc, atomic::{AtomicUsize, AtomicBool, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,12 +66,12 @@ impl AppState {
             metrics_handle: None,
         }
     }
-    
+
     pub fn with_metrics(mut self, handle: PrometheusHandle) -> Self {
         self.metrics_handle = Some(Arc::new(handle));
         self
     }
-    
+
     /// Save current config to the config file
     pub async fn save_config(&self) -> Result<(), std::io::Error> {
         let config = self.config.read().await;
@@ -84,19 +87,25 @@ impl AppState {
         }
         logs.push_front(entry);
     }
-    
+
     /// Check if upstream is healthy (fast atomic check)
+    #[allow(dead_code)]
     pub fn is_upstream_healthy(&self) -> bool {
         self.upstream_healthy.load(Ordering::Relaxed)
     }
-    
+
     /// Update upstream health status
-    pub async fn update_health_status(&self, healthy: bool, latency_ms: Option<u64>, error: Option<String>) {
+    pub async fn update_health_status(
+        &self,
+        healthy: bool,
+        latency_ms: Option<u64>,
+        error: Option<String>,
+    ) {
         let mut status = self.health_status.write().await;
-        
+
         status.last_check = Some(Utc::now());
         status.latency_ms = latency_ms;
-        
+
         if healthy {
             status.consecutive_successes += 1;
             status.consecutive_failures = 0;
@@ -106,14 +115,14 @@ impl AppState {
             status.consecutive_successes = 0;
             status.last_error = error;
         }
-        
+
         // Read config thresholds
         let config = self.config.read().await;
         let health_config = config.health_check.as_ref();
         let unhealthy_threshold = health_config.map(|h| h.unhealthy_threshold).unwrap_or(3);
         let healthy_threshold = health_config.map(|h| h.healthy_threshold).unwrap_or(1);
         drop(config);
-        
+
         // Update healthy status based on thresholds
         if status.consecutive_failures >= unhealthy_threshold {
             status.healthy = false;
@@ -123,25 +132,29 @@ impl AppState {
             self.upstream_healthy.store(true, Ordering::Relaxed);
         }
     }
-    
+
     /// Reload configuration from disk
     /// Returns the number of rules in the new config, or an error
     pub async fn reload_config(&self) -> Result<usize, String> {
         let path = self.config_path.as_ref();
-        
+
         // Load new config from file
         let new_config = AppConfig::load(path)
             .map_err(|e| format!("Failed to load config from {}: {}", path, e))?;
-        
+
         let rules_count = new_config.rules.len();
-        
+
         // Update the config
         {
             let mut config = self.config.write().await;
             *config = new_config;
         }
-        
-        tracing::info!("Configuration reloaded from {}: {} rules", path, rules_count);
+
+        tracing::info!(
+            "Configuration reloaded from {}: {} rules",
+            path,
+            rules_count
+        );
         Ok(rules_count)
     }
 }

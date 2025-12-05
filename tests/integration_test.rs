@@ -29,15 +29,14 @@ async fn is_proxy_running() -> bool {
 
 /// Helper to check if API is running
 async fn is_api_running() -> bool {
-    match timeout(
-        CONNECTION_TIMEOUT,
-        TcpStream::connect(format!("{}:{}", PROXY_HOST, API_PORT)),
+    matches!(
+        timeout(
+            CONNECTION_TIMEOUT,
+            TcpStream::connect(format!("{}:{}", PROXY_HOST, API_PORT)),
+        )
+        .await,
+        Ok(Ok(_))
     )
-    .await
-    {
-        Ok(Ok(_)) => true,
-        _ => false,
-    }
 }
 
 mod api_tests {
@@ -311,7 +310,7 @@ mod postgres_tests {
         // Read response (should be 'S' for SSL supported or 'N' for not supported)
         let mut buf = [0u8; 1];
         match timeout(CONNECTION_TIMEOUT, stream.read(&mut buf)).await {
-            Ok(Ok(n)) if n == 1 => {
+            Ok(Ok(1)) => {
                 let response = buf[0] as char;
                 assert!(
                     response == 'S' || response == 'N',
@@ -405,10 +404,10 @@ mod mysql_tests {
                 // MySQL packet header: 3 bytes length + 1 byte sequence
                 let length = (buf[0] as u32) | ((buf[1] as u32) << 8) | ((buf[2] as u32) << 16);
                 let sequence = buf[3];
-                
+
                 assert!(length > 0, "MySQL handshake packet should have content");
                 assert_eq!(sequence, 0, "Initial handshake should have sequence 0");
-                
+
                 // Protocol version should be 10 (0x0a)
                 if n > 4 {
                     assert_eq!(
@@ -426,8 +425,6 @@ mod mysql_tests {
 }
 
 mod masking_tests {
-    use super::*;
-
     /// Test that email patterns are detected correctly
     #[test]
     fn test_email_detection_pattern() {
@@ -553,18 +550,18 @@ mod protocol_tests {
     fn test_postgres_message_length_calculation() {
         // PostgreSQL message format: Type (1 byte) + Length (4 bytes) + Payload
         // Length includes itself but NOT the type byte
-        
+
         let payload = b"SELECT 1";
         let msg_type: u8 = b'Q'; // Query message
-        
+
         // Total length = 4 (length field) + payload.len()
         let total_length: u32 = 4 + payload.len() as u32;
-        
+
         let mut message = Vec::new();
         message.push(msg_type);
         message.extend_from_slice(&total_length.to_be_bytes());
         message.extend_from_slice(payload);
-        
+
         // Verify message structure
         assert_eq!(message[0], b'Q');
         let parsed_length = u32::from_be_bytes([message[1], message[2], message[3], message[4]]);
@@ -575,26 +572,25 @@ mod protocol_tests {
     #[test]
     fn test_mysql_packet_length_calculation() {
         // MySQL packet format: Length (3 bytes LE) + Sequence (1 byte) + Payload
-        
+
         let payload = b"SELECT 1";
         let sequence: u8 = 0;
-        
+
         let length = payload.len() as u32;
         let length_bytes = [
             (length & 0xFF) as u8,
             ((length >> 8) & 0xFF) as u8,
             ((length >> 16) & 0xFF) as u8,
         ];
-        
+
         let mut packet = Vec::new();
         packet.extend_from_slice(&length_bytes);
         packet.push(sequence);
         packet.extend_from_slice(payload);
-        
+
         // Verify packet structure
-        let parsed_length = (packet[0] as u32)
-            | ((packet[1] as u32) << 8)
-            | ((packet[2] as u32) << 16);
+        let parsed_length =
+            (packet[0] as u32) | ((packet[1] as u32) << 8) | ((packet[2] as u32) << 16);
         assert_eq!(parsed_length, 8);
         assert_eq!(packet[3], 0); // sequence
     }

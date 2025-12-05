@@ -112,36 +112,41 @@ async fn run_health_check_task(
     let config = config.unwrap_or_default();
     let interval = Duration::from_secs(config.interval_secs);
     let timeout = Duration::from_secs(config.timeout_secs);
-    
+
     info!(
         "Starting upstream health check task (interval: {}s, timeout: {}s)",
         config.interval_secs, config.timeout_secs
     );
-    
+
     loop {
         let start = Instant::now();
-        
+
         // Try to connect to upstream
         let connect_result = tokio::time::timeout(
             timeout,
-            tokio::net::TcpStream::connect(format!("{}:{}", upstream_host, upstream_port))
-        ).await;
-        
+            tokio::net::TcpStream::connect(format!("{}:{}", upstream_host, upstream_port)),
+        )
+        .await;
+
         let latency = start.elapsed().as_millis() as u64;
-        
+
         match connect_result {
             Ok(Ok(_stream)) => {
                 // Connection successful
                 state.update_health_status(true, Some(latency), None).await;
                 tracing::debug!(
                     "Health check passed: upstream {}:{} ({}ms)",
-                    upstream_host, upstream_port, latency
+                    upstream_host,
+                    upstream_port,
+                    latency
                 );
             }
             Ok(Err(e)) => {
                 // Connection failed
                 let error = format!("Connection failed: {}", e);
-                state.update_health_status(false, None, Some(error.clone())).await;
+                state
+                    .update_health_status(false, None, Some(error.clone()))
+                    .await;
                 warn!(
                     "Health check failed: upstream {}:{} - {}",
                     upstream_host, upstream_port, error
@@ -150,14 +155,16 @@ async fn run_health_check_task(
             Err(_) => {
                 // Timeout
                 let error = format!("Connection timeout after {}s", config.timeout_secs);
-                state.update_health_status(false, None, Some(error.clone())).await;
+                state
+                    .update_health_status(false, None, Some(error.clone()))
+                    .await;
                 warn!(
                     "Health check timeout: upstream {}:{} - {}",
                     upstream_host, upstream_port, error
                 );
             }
         }
-        
+
         tokio::time::sleep(interval).await;
     }
 }
@@ -166,13 +173,13 @@ async fn run_health_check_task(
 async fn run_config_watcher(state: AppState, config_path: String) {
     use std::path::Path;
     use std::sync::mpsc::channel;
-    
+
     let path = Path::new(&config_path);
     let parent = path.parent().unwrap_or(Path::new("."));
-    
+
     // Create a channel to receive events
     let (tx, rx) = channel();
-    
+
     // Create a watcher with debounce
     let mut watcher: RecommendedWatcher = match Watcher::new(
         move |res: Result<Event, notify::Error>| {
@@ -184,23 +191,32 @@ async fn run_config_watcher(state: AppState, config_path: String) {
     ) {
         Ok(w) => w,
         Err(e) => {
-            warn!("Failed to create config file watcher: {}. Hot reload disabled.", e);
+            warn!(
+                "Failed to create config file watcher: {}. Hot reload disabled.",
+                e
+            );
             return;
         }
     };
-    
+
     // Watch the config file's parent directory
     if let Err(e) = watcher.watch(parent, RecursiveMode::NonRecursive) {
-        warn!("Failed to watch config directory: {}. Hot reload disabled.", e);
+        warn!(
+            "Failed to watch config directory: {}. Hot reload disabled.",
+            e
+        );
         return;
     }
-    
+
     info!("Config file watcher started for {}", config_path);
-    
-    let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("proxy.yaml");
+
+    let filename = path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("proxy.yaml");
     let mut last_reload = Instant::now();
     let debounce_duration = Duration::from_secs(1);
-    
+
     loop {
         // Check for events with a timeout
         match rx.recv_timeout(Duration::from_secs(5)) {
@@ -212,7 +228,7 @@ async fn run_config_watcher(state: AppState, config_path: String) {
                         .map(|f| f == filename)
                         .unwrap_or(false)
                 });
-                
+
                 if is_config_file && last_reload.elapsed() > debounce_duration {
                     info!("Config file changed, reloading...");
                     match state.reload_config().await {
@@ -252,7 +268,7 @@ async fn main() -> Result<()> {
         config.rules.len(),
         args.config
     );
-    
+
     // Initialize Prometheus metrics
     let metrics_handle = metrics::init_metrics();
     info!("Prometheus metrics initialized");
@@ -294,7 +310,7 @@ async fn main() -> Result<()> {
         .as_ref()
         .map(|h| h.enabled)
         .unwrap_or(true);
-    
+
     if health_check_enabled {
         let health_state = state.clone();
         let health_host = args.upstream_host.clone();
@@ -304,7 +320,7 @@ async fn main() -> Result<()> {
             run_health_check_task(health_state, health_host, health_port, health_config).await;
         });
     }
-    
+
     // Start config file watcher for hot reload
     let watch_state = state.clone();
     let config_path = args.config.clone();
@@ -327,15 +343,12 @@ async fn main() -> Result<()> {
     let shutdown_timeout = args.shutdown_timeout;
 
     // Connection limiting
-    let max_connections = config
-        .limits
-        .as_ref()
-        .and_then(|l| l.max_connections);
+    let max_connections = config.limits.as_ref().and_then(|l| l.max_connections);
     let connection_semaphore = max_connections.map(|max| {
         info!("Connection limit set to {}", max);
         Arc::new(Semaphore::new(max))
     });
-    
+
     // Rate limiting state
     let rate_limit = config
         .limits
@@ -353,7 +366,7 @@ async fn main() -> Result<()> {
             // Wait for new connection
             accept_result = listener.accept() => {
                 let (client_socket, client_addr) = accept_result?;
-                
+
                 // Rate limiting check
                 if let Some(max_rate) = rate_limit {
                     // Refill tokens based on elapsed time
@@ -362,7 +375,7 @@ async fn main() -> Result<()> {
                         rate_limit_tokens = max_rate;
                         last_refill = Instant::now();
                     }
-                    
+
                     if rate_limit_tokens == 0 {
                         warn!("Rate limit exceeded, rejecting connection from {}", client_addr);
                         drop(client_socket);
@@ -370,7 +383,7 @@ async fn main() -> Result<()> {
                     }
                     rate_limit_tokens = rate_limit_tokens.saturating_sub(1);
                 }
-                
+
                 // Connection limit check
                 let permit = if let Some(ref sem) = connection_semaphore {
                     match sem.clone().try_acquire_owned() {
@@ -384,7 +397,7 @@ async fn main() -> Result<()> {
                 } else {
                     None
                 };
-                
+
                 info!("Accepted connection from {}", client_addr);
 
                 let upstream_host = args.upstream_host.clone();
@@ -395,7 +408,7 @@ async fn main() -> Result<()> {
                 tokio::spawn(async move {
                     // Hold the permit for the duration of the connection
                     let _permit = permit;
-                    
+
                     let span = info_span!(
                         "connection",
                         client.addr = %client_addr,
@@ -447,20 +460,25 @@ async fn main() -> Result<()> {
     }
 
     // Graceful shutdown: wait for active connections to drain
-    info!("Waiting for {} active connections to close (timeout: {}s)...", 
-          state.active_connections.load(Ordering::Relaxed), shutdown_timeout);
-    
+    info!(
+        "Waiting for {} active connections to close (timeout: {}s)...",
+        state.active_connections.load(Ordering::Relaxed),
+        shutdown_timeout
+    );
+
     // Signal all connections to shutdown
     cancel_token.cancel();
 
     // Wait for connections to drain with timeout
     let drain_start = std::time::Instant::now();
     let timeout_duration = std::time::Duration::from_secs(shutdown_timeout);
-    
+
     while state.active_connections.load(Ordering::Relaxed) > 0 {
         if drain_start.elapsed() >= timeout_duration {
-            warn!("Shutdown timeout reached, {} connections still active", 
-                  state.active_connections.load(Ordering::Relaxed));
+            warn!(
+                "Shutdown timeout reached, {} connections still active",
+                state.active_connections.load(Ordering::Relaxed)
+            );
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -556,8 +574,7 @@ where
         tokio::net::TcpStream::connect(format!("{}:{}", upstream_host, upstream_port)),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("Upstream connection timeout after {:?}", connect_timeout))?
-    ?;
+    .map_err(|_| anyhow::anyhow!("Upstream connection timeout after {:?}", connect_timeout))??;
 
     // Check if upstream TLS is enabled
     let upstream_tls_enabled = {
@@ -595,7 +612,13 @@ where
             let upstream_tls_stream = connector.connect(domain, upstream_socket).await?;
 
             // 4. Continue with TLS stream
-            return handle_postgres_protocol_inner(client_socket, upstream_tls_stream, state, idle_timeout).await;
+            return handle_postgres_protocol_inner(
+                client_socket,
+                upstream_tls_stream,
+                state,
+                idle_timeout,
+            )
+            .await;
         } else {
             tracing::warn!(
                 "Upstream denied SSLRequest. Falling back to cleartext (or aborting if strict)."
@@ -726,8 +749,7 @@ async fn process_mysql_connection(
         tokio::net::TcpStream::connect(format!("{}:{}", upstream_host, upstream_port)),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("Upstream connection timeout after {:?}", connect_timeout))?
-    ?;
+    .map_err(|_| anyhow::anyhow!("Upstream connection timeout after {:?}", connect_timeout))??;
 
     handle_mysql_protocol(client_socket, upstream_socket, state, idle_timeout).await
 }

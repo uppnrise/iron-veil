@@ -532,7 +532,9 @@ mod tests {
             rules: vec![],
             tls: None,
             upstream_tls: false,
-            telemetry: None, api: None, limits: None,
+            telemetry: None,
+            api: None,
+            limits: None,
             health_check: None,
         };
         let state = AppState::new(config, "proxy.yaml".to_string());
@@ -571,7 +573,9 @@ mod tests {
             }],
             tls: None,
             upstream_tls: false,
-            telemetry: None, api: None, limits: None,
+            telemetry: None,
+            api: None,
+            limits: None,
             health_check: None,
         };
         let state = AppState::new(config, "proxy.yaml".to_string());
@@ -613,7 +617,9 @@ mod tests {
             rules: vec![],
             tls: None,
             upstream_tls: false,
-            telemetry: None, api: None, limits: None,
+            telemetry: None,
+            api: None,
+            limits: None,
             health_check: None,
         };
         let state = AppState::new(config, "proxy.yaml".to_string());
@@ -665,7 +671,9 @@ mod tests {
             rules: vec![],
             tls: None,
             upstream_tls: false,
-            telemetry: None, api: None, limits: None,
+            telemetry: None,
+            api: None,
+            limits: None,
             health_check: None,
         };
         let state = AppState::new(config, "proxy.yaml".to_string());
@@ -710,7 +718,9 @@ mod tests {
             rules: vec![],
             tls: None,
             upstream_tls: false,
-            telemetry: None, api: None, limits: None,
+            telemetry: None,
+            api: None,
+            limits: None,
             health_check: None,
         };
         let state = AppState::new(config, "proxy.yaml".to_string());
@@ -744,7 +754,9 @@ mod tests {
             rules: vec![],
             tls: None,
             upstream_tls: false,
-            telemetry: None, api: None, limits: None,
+            telemetry: None,
+            api: None,
+            limits: None,
             health_check: None,
         };
         let state = AppState::new(config, "proxy.yaml".to_string());
@@ -772,7 +784,9 @@ mod tests {
             rules: vec![],
             tls: None,
             upstream_tls: false,
-            telemetry: None, api: None, limits: None,
+            telemetry: None,
+            api: None,
+            limits: None,
             health_check: None,
         };
         let state = AppState::new(config, "proxy.yaml".to_string());
