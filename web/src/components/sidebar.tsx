@@ -71,6 +71,7 @@ export function Sidebar() {
               width={32}
               height={32}
               className="object-contain"
+              style={{ width: "auto", height: "auto" }}
             />
           </div>
           <h1 className="text-2xl font-bold bg-gradient-to-r from-indigo-400 to-cyan-400 bg-clip-text text-transparent">
