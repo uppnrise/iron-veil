@@ -240,6 +240,8 @@ impl PacketInterceptor for Anonymizer {
                         val.clear();
                         val.extend_from_slice(new_json.as_bytes());
                         changed_any = true;
+                        // Record masking stats for JSON
+                        self.state.record_masking("json").await;
                         changes_log.push(json!({
                             "column_idx": i,
                             "strategy": "json",
@@ -269,6 +271,8 @@ impl PacketInterceptor for Anonymizer {
                                             val.clear();
                                             val.extend_from_slice(new_json.as_bytes());
                                             changed_any = true;
+                                            // Record masking stats for heuristic JSON
+                                            self.state.record_masking("json").await;
                                             changes_log.push(json!({
                                                 "column_idx": i,
                                                 "strategy": "json (heuristic)",
@@ -289,6 +293,8 @@ impl PacketInterceptor for Anonymizer {
                                         val.clear();
                                         val.extend_from_slice(masked_array.as_bytes());
                                         changed_any = true;
+                                        // Record masking stats for array (count as other)
+                                        self.state.record_masking("other").await;
                                         changes_log.push(json!({
                                             "column_idx": i,
                                             "strategy": "array (heuristic)",
@@ -318,6 +324,9 @@ impl PacketInterceptor for Anonymizer {
                     val.clear();
                     val.extend_from_slice(fake_val.as_bytes());
                     changed_any = true;
+
+                    // Record masking stats
+                    self.state.record_masking(strat).await;
 
                     changes_log.push(json!({
                         "column_idx": i,
@@ -452,6 +461,8 @@ impl MySqlPacketInterceptor for MySqlAnonymizer {
                         val.clear();
                         val.extend_from_slice(new_json.as_bytes());
                         changed_any = true;
+                        // Record masking stats for JSON
+                        self.state.record_masking("json").await;
                         changes_log.push(json!({
                             "column_idx": i,
                             "column_name": self.column_names.get(i).unwrap_or(&"?".to_string()),
@@ -487,6 +498,9 @@ impl MySqlPacketInterceptor for MySqlAnonymizer {
                     val.clear();
                     val.extend_from_slice(fake_val.as_bytes());
                     changed_any = true;
+
+                    // Record masking stats
+                    self.state.record_masking(strat).await;
 
                     changes_log.push(json!({
                         "column_idx": i,
