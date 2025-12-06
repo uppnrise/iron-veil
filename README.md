@@ -32,12 +32,20 @@
 ### Observability
 *   **Prometheus Metrics**: `/metrics` endpoint with connection, query, and masking metrics.
 *   **OpenTelemetry**: Distributed tracing integration for observability.
+*   **Audit Logging**: Comprehensive audit trail for all security-relevant events.
 *   **Live Inspector**: View real-time query logs and data transformations via the web dashboard.
+
+### Web Dashboard
+*   **Real-time Monitoring**: Live connection graphs, query activity, and masking statistics.
+*   **Rule Management**: Create, test, and preview masking rules with live feedback.
+*   **PII Scanner**: Scan databases for sensitive data and apply rules automatically.
+*   **Theme Support**: Dark, light, and system themes with persistent preference.
+*   **Responsive Design**: Modern UI built with React, Tailwind CSS, and Framer Motion.
 
 ## Tech Stack
 
 *   **Core**: Rust 2024 Edition (Tokio, Axum, tokio-util)
-*   **Frontend**: Next.js, Tailwind CSS, Shadcn UI
+*   **Frontend**: Next.js 16, React 19, Tailwind CSS 4, Shadcn UI, Recharts, Framer Motion
 *   **Observability**: OpenTelemetry (OTLP)
 *   **Deployment**: Docker Compose
 
@@ -187,6 +195,7 @@ The management API runs on port 3001 by default.
 | `/config/reload` | POST | Reload config from disk |
 | `/scan` | POST | Scan database for PII (queries information_schema, samples data) |
 | `/connections` | GET | List active connections |
+| `/stats` | GET | Get statistics (queries, masking counts, connection history) |
 | `/schema` | POST | Get database schema (tables and columns) |
 | `/logs` | GET | Get recent query logs |
 | `/audit` | GET | Get audit logs (supports `?limit=N`, `?event_type=X`, `?outcome=Y`) |
@@ -271,13 +280,13 @@ ironveil_idle_timeouts_total
 ## Development
 
 ```bash
-# Run tests (68 tests total)
+# Run tests (79 tests total)
 cargo test
 
-# Run only unit tests
+# Run only unit tests (62 tests)
 cargo test --bin iron-veil
 
-# Run only integration tests
+# Run only integration tests (17 tests)
 cargo test --test integration_test
 
 # Check for issues
@@ -285,6 +294,9 @@ cargo clippy
 
 # Format code
 cargo fmt
+
+# Build the web dashboard
+cd web && npm install && npm run build
 ```
 
 ## Testing with Docker
