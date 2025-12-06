@@ -67,20 +67,26 @@ async fn api_auth(State(state): State<AppState>, request: Request<Body>, next: N
         if provided_key == expected_key {
             drop(config);
             // Log successful API key auth
-            state.audit_logger.log(
-                AuditLogger::auth_success(AuthMethod::ApiKey, None)
-                    .with_endpoint(&endpoint)
-                    .with_method(&method)
-            ).await;
+            state
+                .audit_logger
+                .log(
+                    AuditLogger::auth_success(AuthMethod::ApiKey, None)
+                        .with_endpoint(&endpoint)
+                        .with_method(&method),
+                )
+                .await;
             return next.run(request).await;
         } else {
             drop(config);
             // Log failed API key auth
-            state.audit_logger.log(
-                AuditLogger::auth_failure(AuthMethod::ApiKey, "Invalid API key")
-                    .with_endpoint(&endpoint)
-                    .with_method(&method)
-            ).await;
+            state
+                .audit_logger
+                .log(
+                    AuditLogger::auth_failure(AuthMethod::ApiKey, "Invalid API key")
+                        .with_endpoint(&endpoint)
+                        .with_method(&method),
+                )
+                .await;
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({
@@ -103,22 +109,31 @@ async fn api_auth(State(state): State<AppState>, request: Request<Body>, next: N
             Ok(claims) => {
                 drop(config);
                 // Log successful JWT auth
-                state.audit_logger.log(
-                    AuditLogger::auth_success(AuthMethod::Jwt, Some(claims.sub))
-                        .with_endpoint(&endpoint)
-                        .with_method(&method)
-                ).await;
+                state
+                    .audit_logger
+                    .log(
+                        AuditLogger::auth_success(AuthMethod::Jwt, Some(claims.sub))
+                            .with_endpoint(&endpoint)
+                            .with_method(&method),
+                    )
+                    .await;
                 return next.run(request).await;
             }
             Err(e) => {
                 tracing::debug!("JWT validation failed: {}", e);
                 drop(config);
                 // Log failed JWT auth
-                state.audit_logger.log(
-                    AuditLogger::auth_failure(AuthMethod::Jwt, format!("JWT validation failed: {}", e))
+                state
+                    .audit_logger
+                    .log(
+                        AuditLogger::auth_failure(
+                            AuthMethod::Jwt,
+                            format!("JWT validation failed: {}", e),
+                        )
                         .with_endpoint(&endpoint)
-                        .with_method(&method)
-                ).await;
+                        .with_method(&method),
+                    )
+                    .await;
                 return (
                     StatusCode::UNAUTHORIZED,
                     Json(json!({
@@ -132,11 +147,14 @@ async fn api_auth(State(state): State<AppState>, request: Request<Body>, next: N
 
     drop(config);
     // Log denied access (no credentials)
-    state.audit_logger.log(
-        AuditLogger::auth_denied()
-            .with_endpoint(&endpoint)
-            .with_method(&method)
-    ).await;
+    state
+        .audit_logger
+        .log(
+            AuditLogger::auth_denied()
+                .with_endpoint(&endpoint)
+                .with_method(&method),
+        )
+        .await;
 
     // No valid authentication provided
     let config = state.config.read().await;
@@ -260,7 +278,10 @@ async fn add_rule(
     }
 
     // Log audit event
-    state.audit_logger.log(AuditLogger::rule_added(rule_json)).await;
+    state
+        .audit_logger
+        .log(AuditLogger::rule_added(rule_json))
+        .await;
 
     (
         StatusCode::OK,
@@ -336,12 +357,13 @@ async fn delete_rule(
     }
 
     // Log audit event
-    state.audit_logger.log(
-        AuditLogger::rule_deleted(json!({
+    state
+        .audit_logger
+        .log(AuditLogger::rule_deleted(json!({
             "request": delete_details,
             "deleted_count": deleted_count
-        }))
-    ).await;
+        })))
+        .await;
 
     (
         StatusCode::OK,
@@ -396,7 +418,10 @@ async fn import_rules(
     }
 
     // Log audit event
-    state.audit_logger.log(AuditLogger::rules_imported(imported_count)).await;
+    state
+        .audit_logger
+        .log(AuditLogger::rules_imported(imported_count))
+        .await;
 
     (
         StatusCode::OK,
@@ -423,16 +448,22 @@ async fn update_config(State(state): State<AppState>, Json(payload): Json<Value>
     if let Some(enabled) = payload.get("masking_enabled").and_then(|v| v.as_bool()) {
         let old_value = config.masking_enabled;
         config.masking_enabled = enabled;
-        changes.insert("masking_enabled".to_string(), json!({
-            "old": old_value,
-            "new": enabled
-        }));
+        changes.insert(
+            "masking_enabled".to_string(),
+            json!({
+                "old": old_value,
+                "new": enabled
+            }),
+        );
     }
     drop(config);
 
     // Log audit event if there were changes
     if !changes.is_empty() {
-        state.audit_logger.log(AuditLogger::config_change(Value::Object(changes))).await;
+        state
+            .audit_logger
+            .log(AuditLogger::config_change(Value::Object(changes)))
+            .await;
     }
 
     let config = state.config.read().await;
@@ -444,7 +475,10 @@ async fn reload_config(State(state): State<AppState>) -> impl IntoResponse {
     match state.reload_config().await {
         Ok(rules_count) => {
             // Log audit event
-            state.audit_logger.log(AuditLogger::config_reload(rules_count)).await;
+            state
+                .audit_logger
+                .log(AuditLogger::config_reload(rules_count))
+                .await;
             (
                 StatusCode::OK,
                 Json(json!({
@@ -477,9 +511,13 @@ async fn scan_database(
     match scanner.scan(&config).await {
         Ok(result) => {
             // Log audit event
-            state.audit_logger.log(
-                AuditLogger::database_scan(&config.database, result.findings.len())
-            ).await;
+            state
+                .audit_logger
+                .log(AuditLogger::database_scan(
+                    &config.database,
+                    result.findings.len(),
+                ))
+                .await;
             (StatusCode::OK, Json(json!(result)))
         }
         Err(e) => (
@@ -504,7 +542,7 @@ async fn get_stats(State(state): State<AppState>) -> Json<Value> {
     let stats = state.get_stats().await;
     let history = state.get_connection_history().await;
     let active_connections = state.active_connections.load(Ordering::Relaxed);
-    
+
     Json(json!({
         "active_connections": active_connections,
         "total_connections": stats.total_connections,
@@ -552,9 +590,13 @@ async fn get_schema(
     match scanner.get_schema(&config).await {
         Ok(schema) => {
             // Log audit event
-            state.audit_logger.log(
-                AuditLogger::schema_query(&config.database, schema.tables.len())
-            ).await;
+            state
+                .audit_logger
+                .log(AuditLogger::schema_query(
+                    &config.database,
+                    schema.tables.len(),
+                ))
+                .await;
             (StatusCode::OK, Json(json!(schema)))
         }
         Err(e) => (
@@ -620,7 +662,10 @@ async fn get_audit_logs(
             _ => None,
         };
         if let Some(o) = out {
-            state.audit_logger.get_entries_by_outcome(o, Some(limit)).await
+            state
+                .audit_logger
+                .get_entries_by_outcome(o, Some(limit))
+                .await
         } else {
             state.audit_logger.get_entries(Some(limit)).await
         }

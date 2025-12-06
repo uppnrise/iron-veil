@@ -330,10 +330,7 @@ impl AuditLogger {
         }
 
         // Open file in append mode
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
 
         let mut writer = BufWriter::new(file);
         let json = serde_json::to_string(&entry)
@@ -436,20 +433,17 @@ impl AuditLogger {
 
     /// Create a config change entry
     pub fn config_change(details: serde_json::Value) -> AuditEntry {
-        AuditEntry::new(AuditEventType::ConfigChange, AuditOutcome::Success)
-            .with_details(details)
+        AuditEntry::new(AuditEventType::ConfigChange, AuditOutcome::Success).with_details(details)
     }
 
     /// Create a rule added entry
     pub fn rule_added(rule: serde_json::Value) -> AuditEntry {
-        AuditEntry::new(AuditEventType::RuleAdded, AuditOutcome::Success)
-            .with_details(rule)
+        AuditEntry::new(AuditEventType::RuleAdded, AuditOutcome::Success).with_details(rule)
     }
 
     /// Create a rule deleted entry
     pub fn rule_deleted(details: serde_json::Value) -> AuditEntry {
-        AuditEntry::new(AuditEventType::RuleDeleted, AuditOutcome::Success)
-            .with_details(details)
+        AuditEntry::new(AuditEventType::RuleDeleted, AuditOutcome::Success).with_details(details)
     }
 
     /// Create a rules imported entry
@@ -466,20 +460,22 @@ impl AuditLogger {
 
     /// Create a database scan entry
     pub fn database_scan(database: &str, findings_count: usize) -> AuditEntry {
-        AuditEntry::new(AuditEventType::DatabaseScan, AuditOutcome::Success)
-            .with_details(serde_json::json!({
+        AuditEntry::new(AuditEventType::DatabaseScan, AuditOutcome::Success).with_details(
+            serde_json::json!({
                 "database": database,
                 "findings_count": findings_count
-            }))
+            }),
+        )
     }
 
     /// Create a schema query entry
     pub fn schema_query(database: &str, tables_count: usize) -> AuditEntry {
-        AuditEntry::new(AuditEventType::SchemaQuery, AuditOutcome::Success)
-            .with_details(serde_json::json!({
+        AuditEntry::new(AuditEventType::SchemaQuery, AuditOutcome::Success).with_details(
+            serde_json::json!({
                 "database": database,
                 "tables_count": tables_count
-            }))
+            }),
+        )
     }
 }
 
@@ -516,8 +512,18 @@ mod tests {
     async fn test_audit_logger_memory_storage() {
         let logger = AuditLogger::new(AuditConfig::default());
 
-        logger.log(AuditEntry::new(AuditEventType::AuthAttempt, AuditOutcome::Success)).await;
-        logger.log(AuditEntry::new(AuditEventType::ConfigChange, AuditOutcome::Success)).await;
+        logger
+            .log(AuditEntry::new(
+                AuditEventType::AuthAttempt,
+                AuditOutcome::Success,
+            ))
+            .await;
+        logger
+            .log(AuditEntry::new(
+                AuditEventType::ConfigChange,
+                AuditOutcome::Success,
+            ))
+            .await;
 
         let entries = logger.get_entries(Some(10)).await;
         assert_eq!(entries.len(), 2);
@@ -530,7 +536,12 @@ mod tests {
     async fn test_audit_logger_disabled() {
         let logger = AuditLogger::disabled();
 
-        logger.log(AuditEntry::new(AuditEventType::AuthAttempt, AuditOutcome::Success)).await;
+        logger
+            .log(AuditEntry::new(
+                AuditEventType::AuthAttempt,
+                AuditOutcome::Success,
+            ))
+            .await;
 
         let entries = logger.get_entries(Some(10)).await;
         assert_eq!(entries.len(), 0);
@@ -545,8 +556,18 @@ mod tests {
         };
         let logger = AuditLogger::new(config);
 
-        logger.log(AuditEntry::new(AuditEventType::AuthAttempt, AuditOutcome::Success)).await;
-        logger.log(AuditEntry::new(AuditEventType::ConfigChange, AuditOutcome::Success)).await;
+        logger
+            .log(AuditEntry::new(
+                AuditEventType::AuthAttempt,
+                AuditOutcome::Success,
+            ))
+            .await;
+        logger
+            .log(AuditEntry::new(
+                AuditEventType::ConfigChange,
+                AuditOutcome::Success,
+            ))
+            .await;
 
         let entries = logger.get_entries(Some(10)).await;
         assert_eq!(entries.len(), 1);
@@ -557,11 +578,28 @@ mod tests {
     async fn test_get_entries_by_type() {
         let logger = AuditLogger::new(AuditConfig::default());
 
-        logger.log(AuditEntry::new(AuditEventType::AuthAttempt, AuditOutcome::Success)).await;
-        logger.log(AuditEntry::new(AuditEventType::AuthAttempt, AuditOutcome::Failure)).await;
-        logger.log(AuditEntry::new(AuditEventType::ConfigChange, AuditOutcome::Success)).await;
+        logger
+            .log(AuditEntry::new(
+                AuditEventType::AuthAttempt,
+                AuditOutcome::Success,
+            ))
+            .await;
+        logger
+            .log(AuditEntry::new(
+                AuditEventType::AuthAttempt,
+                AuditOutcome::Failure,
+            ))
+            .await;
+        logger
+            .log(AuditEntry::new(
+                AuditEventType::ConfigChange,
+                AuditOutcome::Success,
+            ))
+            .await;
 
-        let auth_entries = logger.get_entries_by_type(AuditEventType::AuthAttempt, Some(10)).await;
+        let auth_entries = logger
+            .get_entries_by_type(AuditEventType::AuthAttempt, Some(10))
+            .await;
         assert_eq!(auth_entries.len(), 2);
     }
 
@@ -569,11 +607,28 @@ mod tests {
     async fn test_get_entries_by_outcome() {
         let logger = AuditLogger::new(AuditConfig::default());
 
-        logger.log(AuditEntry::new(AuditEventType::AuthAttempt, AuditOutcome::Success)).await;
-        logger.log(AuditEntry::new(AuditEventType::AuthAttempt, AuditOutcome::Failure)).await;
-        logger.log(AuditEntry::new(AuditEventType::ConfigChange, AuditOutcome::Failure)).await;
+        logger
+            .log(AuditEntry::new(
+                AuditEventType::AuthAttempt,
+                AuditOutcome::Success,
+            ))
+            .await;
+        logger
+            .log(AuditEntry::new(
+                AuditEventType::AuthAttempt,
+                AuditOutcome::Failure,
+            ))
+            .await;
+        logger
+            .log(AuditEntry::new(
+                AuditEventType::ConfigChange,
+                AuditOutcome::Failure,
+            ))
+            .await;
 
-        let failures = logger.get_entries_by_outcome(AuditOutcome::Failure, Some(10)).await;
+        let failures = logger
+            .get_entries_by_outcome(AuditOutcome::Failure, Some(10))
+            .await;
         assert_eq!(failures.len(), 2);
     }
 

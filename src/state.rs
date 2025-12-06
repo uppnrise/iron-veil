@@ -83,11 +83,19 @@ impl MaskingStats {
             _ => self.other += 1,
         }
     }
-    
+
     pub fn total(&self) -> u64 {
-        self.email + self.phone + self.address + self.credit_card + 
-        self.ssn + self.ip + self.dob + self.passport + 
-        self.hash + self.json + self.other
+        self.email
+            + self.phone
+            + self.address
+            + self.credit_card
+            + self.ssn
+            + self.ip
+            + self.dob
+            + self.passport
+            + self.hash
+            + self.json
+            + self.other
     }
 }
 
@@ -175,17 +183,39 @@ impl AppState {
                     rotation_enabled: cfg.rotation_enabled,
                     max_file_size_bytes: cfg.max_file_size_bytes,
                     max_rotated_files: cfg.max_rotated_files,
-                    events: cfg.events.iter().map(|e| match e {
-                        crate::config::AuditEventType::AuthAttempt => crate::audit::AuditEventType::AuthAttempt,
-                        crate::config::AuditEventType::ConfigChange => crate::audit::AuditEventType::ConfigChange,
-                        crate::config::AuditEventType::RuleAdded => crate::audit::AuditEventType::RuleAdded,
-                        crate::config::AuditEventType::RuleDeleted => crate::audit::AuditEventType::RuleDeleted,
-                        crate::config::AuditEventType::RulesImported => crate::audit::AuditEventType::RulesImported,
-                        crate::config::AuditEventType::ConfigReload => crate::audit::AuditEventType::ConfigReload,
-                        crate::config::AuditEventType::DatabaseScan => crate::audit::AuditEventType::DatabaseScan,
-                        crate::config::AuditEventType::SchemaQuery => crate::audit::AuditEventType::SchemaQuery,
-                        crate::config::AuditEventType::ApiAccess => crate::audit::AuditEventType::ApiAccess,
-                    }).collect(),
+                    events: cfg
+                        .events
+                        .iter()
+                        .map(|e| match e {
+                            crate::config::AuditEventType::AuthAttempt => {
+                                crate::audit::AuditEventType::AuthAttempt
+                            }
+                            crate::config::AuditEventType::ConfigChange => {
+                                crate::audit::AuditEventType::ConfigChange
+                            }
+                            crate::config::AuditEventType::RuleAdded => {
+                                crate::audit::AuditEventType::RuleAdded
+                            }
+                            crate::config::AuditEventType::RuleDeleted => {
+                                crate::audit::AuditEventType::RuleDeleted
+                            }
+                            crate::config::AuditEventType::RulesImported => {
+                                crate::audit::AuditEventType::RulesImported
+                            }
+                            crate::config::AuditEventType::ConfigReload => {
+                                crate::audit::AuditEventType::ConfigReload
+                            }
+                            crate::config::AuditEventType::DatabaseScan => {
+                                crate::audit::AuditEventType::DatabaseScan
+                            }
+                            crate::config::AuditEventType::SchemaQuery => {
+                                crate::audit::AuditEventType::SchemaQuery
+                            }
+                            crate::config::AuditEventType::ApiAccess => {
+                                crate::audit::AuditEventType::ApiAccess
+                            }
+                        })
+                        .collect(),
                 })
             })
             .unwrap_or_else(|| AuditLogger::new(crate::audit::AuditConfig::default()));
@@ -332,7 +362,7 @@ impl AppState {
     pub async fn record_history_snapshot(&self) {
         let stats = self.stats.read().await;
         let active = self.active_connections.load(Ordering::Relaxed);
-        
+
         let point = ConnectionDataPoint {
             timestamp: Utc::now(),
             active_connections: active,
@@ -355,7 +385,12 @@ impl AppState {
 
     /// Get connection history for charts
     pub async fn get_connection_history(&self) -> Vec<ConnectionDataPoint> {
-        self.connection_history.read().await.iter().cloned().collect()
+        self.connection_history
+            .read()
+            .await
+            .iter()
+            .cloned()
+            .collect()
     }
 }
 
@@ -367,13 +402,13 @@ mod tests {
     #[test]
     fn test_masking_stats_increment() {
         let mut stats = MaskingStats::default();
-        
+
         stats.increment("email");
         stats.increment("email");
         stats.increment("phone");
         stats.increment("credit_card");
         stats.increment("unknown_strategy");
-        
+
         assert_eq!(stats.email, 2);
         assert_eq!(stats.phone, 1);
         assert_eq!(stats.credit_card, 1);
@@ -384,7 +419,7 @@ mod tests {
     #[test]
     fn test_masking_stats_all_strategies() {
         let mut stats = MaskingStats::default();
-        
+
         stats.increment("email");
         stats.increment("phone");
         stats.increment("address");
@@ -396,7 +431,7 @@ mod tests {
         stats.increment("hash");
         stats.increment("json");
         stats.increment("other");
-        
+
         assert_eq!(stats.email, 1);
         assert_eq!(stats.phone, 1);
         assert_eq!(stats.address, 1);
@@ -414,14 +449,14 @@ mod tests {
     #[test]
     fn test_query_stats_record() {
         let mut stats = QueryStats::default();
-        
+
         stats.record_query("SELECT");
         stats.record_query("select"); // lowercase should also work
         stats.record_query("INSERT");
         stats.record_query("UPDATE");
         stats.record_query("DELETE");
         stats.record_query("TRUNCATE"); // unknown goes to other
-        
+
         assert_eq!(stats.total_queries, 6);
         assert_eq!(stats.select_count, 2);
         assert_eq!(stats.insert_count, 1);
@@ -444,11 +479,11 @@ mod tests {
             audit: None,
         };
         let state = AppState::new_for_test(config, "proxy.yaml".to_string());
-        
+
         state.record_masking("email").await;
         state.record_masking("email").await;
         state.record_masking("phone").await;
-        
+
         let stats = state.get_stats().await;
         assert_eq!(stats.masking.email, 2);
         assert_eq!(stats.masking.phone, 1);
@@ -469,11 +504,11 @@ mod tests {
             audit: None,
         };
         let state = AppState::new_for_test(config, "proxy.yaml".to_string());
-        
+
         state.record_query("SELECT").await;
         state.record_query("INSERT").await;
         state.record_query("SELECT").await;
-        
+
         let stats = state.get_stats().await;
         assert_eq!(stats.queries.total_queries, 3);
         assert_eq!(stats.queries.select_count, 2);
@@ -494,11 +529,11 @@ mod tests {
             audit: None,
         };
         let state = AppState::new_for_test(config, "proxy.yaml".to_string());
-        
+
         state.record_connection().await;
         state.record_connection().await;
         state.record_connection().await;
-        
+
         let stats = state.get_stats().await;
         assert_eq!(stats.total_connections, 3);
     }
@@ -517,14 +552,14 @@ mod tests {
             audit: None,
         };
         let state = AppState::new_for_test(config, "proxy.yaml".to_string());
-        
+
         // Record some stats
         state.record_query("SELECT").await;
         state.record_masking("email").await;
-        
+
         // Take a snapshot
         state.record_history_snapshot().await;
-        
+
         let history = state.get_connection_history().await;
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].total_queries, 1);
@@ -545,12 +580,12 @@ mod tests {
             audit: None,
         };
         let state = AppState::new_for_test(config, "proxy.yaml".to_string());
-        
+
         // Record more than 60 snapshots
         for _ in 0..70 {
             state.record_history_snapshot().await;
         }
-        
+
         let history = state.get_connection_history().await;
         assert_eq!(history.len(), 60, "History should be capped at 60 entries");
     }

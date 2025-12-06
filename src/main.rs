@@ -694,7 +694,7 @@ where
                                     content: query_str.clone(),
                                     details: None,
                                 }).await;
-                                
+
                                 // Record query type stats
                                 let query_type = query_str
                                     .split_whitespace()
@@ -702,7 +702,7 @@ where
                                     .unwrap_or("OTHER")
                                     .to_uppercase();
                                 state.record_query(&query_type).await;
-                                
+
                                 upstream_framed.send(msg).await?;
                             }
                             PgMessage::Parse(ref p) => {
@@ -716,7 +716,7 @@ where
                                     content: query_str.clone(),
                                     details: None,
                                 }).await;
-                                
+
                                 // Record query type stats for prepared statements
                                 let query_type = query_str
                                     .split_whitespace()
@@ -724,7 +724,7 @@ where
                                     .unwrap_or("OTHER")
                                     .to_uppercase();
                                 state.record_query(&query_type).await;
-                                
+
                                 upstream_framed.send(msg).await?;
                             }
                             _ => {
@@ -902,7 +902,7 @@ where
                                 content: query_str.clone(),
                                 details: None,
                             }).await;
-                            
+
                             // Record query type stats
                             let query_type = query_str
                                 .split_whitespace()
@@ -910,7 +910,7 @@ where
                                 .unwrap_or("OTHER")
                                 .to_uppercase();
                             state.record_query(&query_type).await;
-                            
+
                             // Reset interceptor for new result set
                             interceptor.reset_columns();
                         }

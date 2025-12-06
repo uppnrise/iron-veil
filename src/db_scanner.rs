@@ -283,14 +283,18 @@ impl DbScanner {
             self.host, self.port, config.username, config.password, config.database
         );
 
-        debug!("Connecting to PostgreSQL: host={}, port={}, db={}", self.host, self.port, config.database);
-        
-        let (client, connection) = tokio_postgres::connect(&conn_str, NoTls)
-            .await
-            .map_err(|e| {
-                warn!("PostgreSQL connection failed: {}", e);
-                ScanError::ConnectionFailed(format!("{}", e))
-            })?;
+        debug!(
+            "Connecting to PostgreSQL: host={}, port={}, db={}",
+            self.host, self.port, config.database
+        );
+
+        let (client, connection) =
+            tokio_postgres::connect(&conn_str, NoTls)
+                .await
+                .map_err(|e| {
+                    warn!("PostgreSQL connection failed: {}", e);
+                    ScanError::ConnectionFailed(format!("{}", e))
+                })?;
 
         // Spawn connection handler
         tokio::spawn(async move {
@@ -423,15 +427,11 @@ impl DbScanner {
         limit: usize,
     ) -> Result<Vec<HashMap<String, Option<String>>>, ScanError> {
         // Use TABLESAMPLE for large tables, or LIMIT for smaller ones
-        let query = format!(
-            r#"SELECT * FROM "{}"."{}" LIMIT {}"#,
-            schema, table, limit
-        );
+        let query = format!(r#"SELECT * FROM "{}"."{}" LIMIT {}"#, schema, table, limit);
 
-        let rows = client
-            .query(&query, &[])
-            .await
-            .map_err(|e| ScanError::QueryFailed(format!("Failed to sample {}.{}: {}", schema, table, e)))?;
+        let rows = client.query(&query, &[]).await.map_err(|e| {
+            ScanError::QueryFailed(format!("Failed to sample {}.{}: {}", schema, table, e))
+        })?;
 
         let result: Vec<HashMap<String, Option<String>>> = rows
             .iter()
@@ -493,10 +493,7 @@ impl DbScanner {
         let name_lower = column_name.to_lowercase();
 
         // Email patterns
-        if name_lower.contains("email")
-            || name_lower.contains("e_mail")
-            || name_lower == "mail"
-        {
+        if name_lower.contains("email") || name_lower.contains("e_mail") || name_lower == "mail" {
             return Some(PiiType::Email);
         }
 
@@ -526,7 +523,8 @@ impl DbScanner {
             || name_lower.contains("card_number")
             || name_lower.contains("cardnumber")
             || name_lower == "cc_num"
-            || name_lower == "pan" // Primary Account Number
+            || name_lower == "pan"
+        // Primary Account Number
         {
             return Some(PiiType::CreditCard);
         }
@@ -657,14 +655,8 @@ mod tests {
             scanner.check_column_name_heuristics("passport_number"),
             Some(PiiType::Passport)
         );
-        assert_eq!(
-            scanner.check_column_name_heuristics("username"),
-            None
-        );
-        assert_eq!(
-            scanner.check_column_name_heuristics("created_at"),
-            None
-        );
+        assert_eq!(scanner.check_column_name_heuristics("username"), None);
+        assert_eq!(scanner.check_column_name_heuristics("created_at"), None);
     }
 
     #[test]
