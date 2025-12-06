@@ -1,7 +1,7 @@
 "use client"
 
 import { useQuery } from "@tanstack/react-query"
-import { useState, useEffect } from "react"
+import { useMemo } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { StatsCard } from "@/components/stats-card"
 import { ConnectionsChart, MultiLineChart } from "@/components/charts"
@@ -11,10 +11,8 @@ import { Badge } from "@/components/ui/badge"
 import { 
   Activity, 
   ShieldCheck, 
-  Server, 
   Database,
   Clock,
-  Zap,
   Eye,
   TrendingUp,
   RefreshCw
@@ -57,14 +55,6 @@ interface StatsResponse {
   }>
 }
 
-// Types for connection history display
-interface ConnectionDataPoint {
-  timestamp: string
-  value: number
-  queries: number
-  masked: number
-}
-
 interface LogEntry {
   id: string
   timestamp: string
@@ -73,8 +63,6 @@ interface LogEntry {
 }
 
 export default function DashboardPage() {
-  const [connectionHistory, setConnectionHistory] = useState<ConnectionDataPoint[]>([])
-
   const { data: health } = useQuery({
     queryKey: ["health"],
     queryFn: () => fetch(`${API_BASE}/health`).then((res) => res.json()),
@@ -99,25 +87,23 @@ export default function DashboardPage() {
   })
 
   // Transform stats history into connection history format
-  useEffect(() => {
-    if (stats?.history) {
-      const transformedHistory = stats.history
-        .slice()
-        .reverse() // Backend returns newest first
-        .map((point) => ({
-          timestamp: new Date(point.timestamp).toLocaleTimeString('en-US', { 
-            hour: '2-digit', 
-            minute: '2-digit',
-            second: '2-digit',
-            hour12: false 
-          }),
-          value: point.active_connections,
-          queries: point.total_queries,
-          masked: point.total_masked,
-        }))
-      setConnectionHistory(transformedHistory)
-    }
-  }, [stats?.history])
+  const connectionHistory = useMemo(() => {
+    if (!stats?.history) return []
+    return stats.history
+      .slice()
+      .reverse() // Backend returns newest first
+      .map((point) => ({
+        timestamp: new Date(point.timestamp).toLocaleTimeString('en-US', { 
+          hour: '2-digit', 
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: false 
+        }),
+        value: point.active_connections,
+        queries: point.total_queries,
+        masked: point.total_masked,
+      }))
+  }, [stats])
 
   // Build masking stats from real data
   const maskingStats = stats ? [
