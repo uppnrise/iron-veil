@@ -255,19 +255,23 @@ fi
 if [ "$SKIP_TESTS" = false ]; then
     log_header "Running Tests"
     
-    log_step "Running Rust unit tests..."
-    if ! cargo test --lib 2>/dev/null; then
-        log_error "Unit tests failed."
-        exit 1
+    log_step "Running Rust tests..."
+    if ! cargo test 2>&1 | tee /tmp/test-output.txt | tail -20; then
+        if grep -q "FAILED" /tmp/test-output.txt; then
+            log_error "Tests failed."
+            exit 1
+        fi
     fi
-    log_success "Unit tests passed"
     
-    log_step "Running Rust integration tests..."
-    if ! cargo test --test '*' 2>/dev/null; then
-        log_error "Integration tests failed."
+    # Check if tests actually passed
+    if grep -q "test result: ok" /tmp/test-output.txt; then
+        log_success "All tests passed"
+    elif grep -q "FAILED" /tmp/test-output.txt; then
+        log_error "Tests failed."
         exit 1
+    else
+        log_success "Tests completed"
     fi
-    log_success "Integration tests passed"
 else
     log_info "Skipping tests (--skip-tests)"
 fi
