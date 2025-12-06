@@ -697,7 +697,6 @@ where
                                 
                                 // Record query type stats
                                 let query_type = query_str
-                                    .trim()
                                     .split_whitespace()
                                     .next()
                                     .unwrap_or("OTHER")
@@ -720,7 +719,6 @@ where
                                 
                                 // Record query type stats for prepared statements
                                 let query_type = query_str
-                                    .trim()
                                     .split_whitespace()
                                     .next()
                                     .unwrap_or("OTHER")
@@ -907,7 +905,6 @@ where
                             
                             // Record query type stats
                             let query_type = query_str
-                                .trim()
                                 .split_whitespace()
                                 .next()
                                 .unwrap_or("OTHER")
