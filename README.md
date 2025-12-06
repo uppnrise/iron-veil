@@ -185,9 +185,9 @@ The management API runs on port 3001 by default.
 | `/config` | GET | Get current configuration |
 | `/config` | POST | Update configuration |
 | `/config/reload` | POST | Reload config from disk |
-| `/scan` | POST | Scan database for PII |
+| `/scan` | POST | Scan database for PII (queries information_schema, samples data) |
 | `/connections` | GET | List active connections |
-| `/schema` | GET | Get database schema |
+| `/schema` | POST | Get database schema (tables and columns) |
 | `/logs` | GET | Get recent query logs |
 
 ### Authentication
@@ -224,6 +224,7 @@ iron-veil/
 │   ├── api.rs           # Axum management API
 │   ├── state.rs         # Shared application state
 │   ├── scanner.rs       # PII regex scanner (7 PII types)
+│   ├── db_scanner.rs    # Real database introspection & PII scanning
 │   ├── interceptor.rs   # Anonymizer implementations (PG + MySQL)
 │   ├── telemetry.rs     # OpenTelemetry setup
 │   ├── metrics.rs       # Prometheus metrics

@@ -21,6 +21,7 @@ src/
 ├── api.rs           # Axum REST API for management dashboard
 ├── state.rs         # Shared AppState (config, logs, connections)
 ├── scanner.rs       # Regex-based PII detection
+├── db_scanner.rs    # Real database introspection & PII scanning
 ├── interceptor.rs   # Anonymizer trait + implementations for PG and MySQL
 ├── telemetry.rs     # OpenTelemetry initialization
 └── protocol/
@@ -56,6 +57,8 @@ src/
 - Deterministic masking (seeded fake data generation)
 - OpenTelemetry distributed tracing
 - Management API with live query inspector
+- Real database introspection (information_schema queries)
+- PII scanning with confidence scores and sample masking
 
 ## Frontend Guidelines
 - Use Functional Components with Hooks.
