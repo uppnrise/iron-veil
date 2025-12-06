@@ -537,7 +537,7 @@ mod tests {
             limits: None,
             health_check: None,
         };
-        let state = AppState::new(config, "proxy.yaml".to_string());
+        let state = AppState::new_for_test(config, "proxy.yaml".to_string());
         let mut anonymizer = Anonymizer::new(state, 1);
 
         // Create a DataRow with an email
@@ -578,7 +578,7 @@ mod tests {
             limits: None,
             health_check: None,
         };
-        let state = AppState::new(config, "proxy.yaml".to_string());
+        let state = AppState::new_for_test(config, "proxy.yaml".to_string());
         let mut anonymizer = Anonymizer::new(state, 1);
 
         let desc = RowDescription {
@@ -622,7 +622,7 @@ mod tests {
             limits: None,
             health_check: None,
         };
-        let state = AppState::new(config, "proxy.yaml".to_string());
+        let state = AppState::new_for_test(config, "proxy.yaml".to_string());
         let mut anonymizer = Anonymizer::new(state, 1);
 
         let json_data = r#"
@@ -676,7 +676,7 @@ mod tests {
             limits: None,
             health_check: None,
         };
-        let state = AppState::new(config, "proxy.yaml".to_string());
+        let state = AppState::new_for_test(config, "proxy.yaml".to_string());
         let mut anonymizer = Anonymizer::new(state, 1);
 
         // Postgres array format: {val1,val2}
@@ -723,7 +723,7 @@ mod tests {
             limits: None,
             health_check: None,
         };
-        let state = AppState::new(config, "proxy.yaml".to_string());
+        let state = AppState::new_for_test(config, "proxy.yaml".to_string());
         let mut anonymizer = Anonymizer::new(state, 1);
 
         let email = "test@example.com";
@@ -759,7 +759,7 @@ mod tests {
             limits: None,
             health_check: None,
         };
-        let state = AppState::new(config, "proxy.yaml".to_string());
+        let state = AppState::new_for_test(config, "proxy.yaml".to_string());
         let mut anonymizer = Anonymizer::new(state, 1);
 
         let email = "test@example.com";
@@ -789,7 +789,7 @@ mod tests {
             limits: None,
             health_check: None,
         };
-        let state = AppState::new(config, "proxy.yaml".to_string());
+        let state = AppState::new_for_test(config, "proxy.yaml".to_string());
         let mut anonymizer = Anonymizer::new(state, 1);
 
         let mut row = DataRow {

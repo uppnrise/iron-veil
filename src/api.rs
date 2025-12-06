@@ -1,4 +1,5 @@
 use crate::config::MaskingRule;
+use crate::db_scanner::{DbScanner, ScanConfig};
 use crate::state::AppState;
 use axum::{
     Json, Router,
@@ -135,7 +136,7 @@ pub async fn start_api_server(port: u16, state: AppState) -> anyhow::Result<()> 
         .route("/config/reload", post(reload_config))
         .route("/scan", post(scan_database))
         .route("/connections", get(get_connections))
-        .route("/schema", get(get_schema))
+        .route("/schema", post(get_schema))
         .route("/logs", get(get_logs))
         .layer(middleware::from_fn_with_state(state.clone(), api_auth));
 
@@ -385,44 +386,26 @@ async fn reload_config(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
-async fn scan_database() -> Json<Value> {
-    // Mocked scan results for Phase 3.3
-    // In a real implementation, this would query the upstream DB and sample data.
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await; // Simulate work
+async fn scan_database(
+    State(state): State<AppState>,
+    Json(config): Json<ScanConfig>,
+) -> impl IntoResponse {
+    let scanner = DbScanner::new(
+        state.upstream_host.to_string(),
+        state.upstream_port,
+        state.db_protocol,
+    );
 
-    Json(json!({
-        "status": "completed",
-        "findings": [
-            {
-                "table": "users",
-                "column": "email",
-                "type": "Email",
-                "confidence": 0.99,
-                "sample": "jdoe@example.com"
-            },
-            {
-                "table": "users",
-                "column": "phone_number",
-                "type": "Phone",
-                "confidence": 0.95,
-                "sample": "+1-555-0123"
-            },
-            {
-                "table": "orders",
-                "column": "shipping_address",
-                "type": "Address",
-                "confidence": 0.85,
-                "sample": "123 Main St, Springfield"
-            },
-            {
-                "table": "customers",
-                "column": "cc_num",
-                "type": "CreditCard",
-                "confidence": 0.98,
-                "sample": "4532-xxxx-xxxx-1234"
-            }
-        ]
-    }))
+    match scanner.scan(&config).await {
+        Ok(result) => (StatusCode::OK, Json(json!(result))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "status": "error",
+                "error": e.to_string()
+            })),
+        ),
+    }
 }
 
 async fn get_connections(State(state): State<AppState>) -> Json<Value> {
@@ -432,11 +415,26 @@ async fn get_connections(State(state): State<AppState>) -> Json<Value> {
     }))
 }
 
-async fn get_schema() -> Json<Value> {
-    Json(json!({
-        "tables": [],
-        "note": "Schema discovery requires upstream connection. Coming in Phase 3.4"
-    }))
+async fn get_schema(
+    State(state): State<AppState>,
+    Json(config): Json<ScanConfig>,
+) -> impl IntoResponse {
+    let scanner = DbScanner::new(
+        state.upstream_host.to_string(),
+        state.upstream_port,
+        state.db_protocol,
+    );
+
+    match scanner.get_schema(&config).await {
+        Ok(schema) => (StatusCode::OK, Json(json!(schema))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "status": "error",
+                "error": e.to_string()
+            })),
+        ),
+    }
 }
 
 async fn get_logs(State(state): State<AppState>) -> Json<Value> {
@@ -474,7 +472,7 @@ mod tests {
     #[tokio::test]
     async fn test_health_check() {
         let config = AppConfig::default();
-        let state = AppState::new(config, "proxy.yaml".to_string());
+        let state = AppState::new_for_test(config, "proxy.yaml".to_string());
         let response = health_check(State(state)).await;
         let (status, _json) = response.into_response().into_parts();
 
@@ -492,7 +490,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let state = AppState::new(config, "proxy.yaml".to_string());
+        let state = AppState::new_for_test(config, "proxy.yaml".to_string());
         let config_guard = state.config.read().await;
 
         let required_key = config_guard
@@ -507,7 +505,7 @@ mod tests {
     async fn test_api_key_none_when_not_configured() {
         // Test that no API key means None
         let config = AppConfig::default();
-        let state = AppState::new(config, "proxy.yaml".to_string());
+        let state = AppState::new_for_test(config, "proxy.yaml".to_string());
         let config_guard = state.config.read().await;
 
         let required_key = config_guard
@@ -593,7 +591,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let state = AppState::new(config, "proxy.yaml".to_string());
+        let state = AppState::new_for_test(config, "proxy.yaml".to_string());
         let config_guard = state.config.read().await;
 
         let jwt_secret = config_guard
@@ -620,7 +618,7 @@ mod tests {
             limits: None,
             health_check: None,
         };
-        let state = AppState::new(config, "proxy.yaml".to_string());
+        let state = AppState::new_for_test(config, "proxy.yaml".to_string());
 
         let response = get_config(State(state)).await;
         let json = response.0;
@@ -641,7 +639,7 @@ mod tests {
             limits: None,
             health_check: None,
         };
-        let state = AppState::new(config, "proxy.yaml".to_string());
+        let state = AppState::new_for_test(config, "proxy.yaml".to_string());
 
         let payload = json!({ "masking_enabled": false });
         let response = update_config(State(state.clone()), Json(payload)).await;
@@ -667,7 +665,7 @@ mod tests {
             limits: None,
             health_check: None,
         };
-        let state = AppState::new(config, "/tmp/test_proxy.yaml".to_string());
+        let state = AppState::new_for_test(config, "/tmp/test_proxy.yaml".to_string());
 
         // Create temp file so save works
         std::fs::write("/tmp/test_proxy.yaml", "rules: []").ok();
@@ -703,7 +701,7 @@ mod tests {
             limits: None,
             health_check: None,
         };
-        let state = AppState::new(config, "proxy.yaml".to_string());
+        let state = AppState::new_for_test(config, "proxy.yaml".to_string());
 
         let response = get_rules(State(state)).await;
         let json = response.0;
@@ -724,7 +722,7 @@ mod tests {
             limits: None,
             health_check: None,
         };
-        let state = AppState::new(config, "proxy.yaml".to_string());
+        let state = AppState::new_for_test(config, "proxy.yaml".to_string());
 
         // Simulate some connections
         state.active_connections.fetch_add(3, Ordering::Relaxed);
@@ -735,21 +733,6 @@ mod tests {
         assert_eq!(json["active_connections"], 3);
     }
 
-    #[tokio::test]
-    async fn test_scan_database_returns_findings() {
-        let response = scan_database().await;
-        let json = response.0;
-
-        assert_eq!(json["status"], "completed");
-        assert!(json["findings"].is_array());
-
-        let findings = json["findings"].as_array().unwrap();
-        assert!(!findings.is_empty());
-
-        // Check structure of first finding
-        assert!(findings[0]["table"].is_string());
-        assert!(findings[0]["column"].is_string());
-        assert!(findings[0]["type"].is_string());
-        assert!(findings[0]["confidence"].is_number());
-    }
+    // Note: scan_database and get_schema tests require a real database connection
+    // They are tested via E2E tests instead
 }

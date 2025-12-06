@@ -80,13 +80,32 @@ health_check:
 
 **Files:** `src/main.rs`, `src/api.rs`, `src/state.rs`, `src/config.rs`
 
-### 8. Implement Real Database Scanner
-- [ ] Replace mocked `/scan` endpoint with actual implementation
-- [ ] Query `information_schema` for column metadata
-- [ ] Sample data from tables for PII detection
-- [ ] Support both PostgreSQL and MySQL schemas
+### 8. Implement Real Database Scanner ✅
+- [x] Replace mocked `/scan` endpoint with actual implementation
+- [x] Query `information_schema` for column metadata
+- [x] Sample data from tables for PII detection
+- [x] Support PostgreSQL schemas (MySQL in future)
+- [x] Column name heuristics for PII detection
+- [x] Schema discovery endpoint (`POST /schema`)
 
-**Files:** `src/api.rs`, `src/scanner.rs`
+**API Endpoints:**
+- `POST /scan` - Scan database for PII (requires db credentials in body)
+- `POST /schema` - Get database schema information
+
+**Request Body:**
+```json
+{
+  "username": "postgres",
+  "password": "password",
+  "database": "mydb",
+  "schema": "public",
+  "sample_size": 100,
+  "confidence_threshold": 0.5,
+  "exclude_tables": ["migrations", "logs"]
+}
+```
+
+**Files:** `src/db_scanner.rs` (new), `src/api.rs`, `src/state.rs`, `Cargo.toml`
 
 ### 9. Rule Persistence ✅
 - [x] Save rules added via API back to `proxy.yaml`

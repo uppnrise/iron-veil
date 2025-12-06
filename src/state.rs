@@ -43,6 +43,13 @@ impl Default for HealthStatus {
     }
 }
 
+/// Database protocol type for upstream connection
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DbProtocol {
+    Postgres,
+    MySql,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<RwLock<AppConfig>>,
@@ -52,10 +59,22 @@ pub struct AppState {
     pub upstream_healthy: Arc<AtomicBool>,
     pub health_status: Arc<RwLock<HealthStatus>>,
     pub metrics_handle: Option<Arc<PrometheusHandle>>,
+    /// Upstream database host for scanning
+    pub upstream_host: Arc<String>,
+    /// Upstream database port for scanning
+    pub upstream_port: u16,
+    /// Database protocol (Postgres or MySQL)
+    pub db_protocol: DbProtocol,
 }
 
 impl AppState {
-    pub fn new(config: AppConfig, config_path: String) -> Self {
+    pub fn new(
+        config: AppConfig,
+        config_path: String,
+        upstream_host: String,
+        upstream_port: u16,
+        db_protocol: DbProtocol,
+    ) -> Self {
         Self {
             config: Arc::new(RwLock::new(config)),
             config_path: Arc::new(config_path),
@@ -64,7 +83,22 @@ impl AppState {
             upstream_healthy: Arc::new(AtomicBool::new(true)),
             health_status: Arc::new(RwLock::new(HealthStatus::default())),
             metrics_handle: None,
+            upstream_host: Arc::new(upstream_host),
+            upstream_port,
+            db_protocol,
         }
+    }
+
+    /// Create a new AppState with default upstream settings (for testing)
+    #[cfg(test)]
+    pub fn new_for_test(config: AppConfig, config_path: String) -> Self {
+        Self::new(
+            config,
+            config_path,
+            "localhost".to_string(),
+            5432,
+            DbProtocol::Postgres,
+        )
     }
 
     pub fn with_metrics(mut self, handle: PrometheusHandle) -> Self {

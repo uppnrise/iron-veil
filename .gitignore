@@ -12,3 +12,6 @@
 # Rust
 **/*.rs.bk
 
+# Certificates (generated locally)
+/certs/
+

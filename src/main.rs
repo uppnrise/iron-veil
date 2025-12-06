@@ -8,6 +8,7 @@ use tracing::{Instrument, info, info_span, warn};
 
 mod api;
 mod config;
+mod db_scanner;
 mod interceptor;
 mod metrics;
 mod protocol;
@@ -19,7 +20,7 @@ use crate::config::AppConfig;
 use crate::interceptor::{Anonymizer, MySqlAnonymizer, MySqlPacketInterceptor, PacketInterceptor};
 use crate::protocol::mysql::{MySqlCodec, MySqlMessage};
 use crate::protocol::postgres::{PgMessage, PostgresCodec};
-use crate::state::{AppState, LogEntry};
+use crate::state::{AppState, DbProtocol as StateDbProtocol, LogEntry};
 use bytes::BufMut;
 use chrono::Utc;
 use futures::{SinkExt, StreamExt};
@@ -293,7 +294,18 @@ async fn main() -> Result<()> {
     };
 
     // Initialize shared state
-    let state = AppState::new(config.clone(), args.config.clone()).with_metrics(metrics_handle);
+    let db_protocol = match args.protocol {
+        DbProtocol::Postgres => StateDbProtocol::Postgres,
+        DbProtocol::Mysql => StateDbProtocol::MySql,
+    };
+    let state = AppState::new(
+        config.clone(),
+        args.config.clone(),
+        args.upstream_host.clone(),
+        args.upstream_port,
+        db_protocol,
+    )
+    .with_metrics(metrics_handle);
 
     // Start Management API in a separate task
     let api_port = args.api_port;
