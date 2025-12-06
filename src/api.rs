@@ -177,6 +177,7 @@ pub async fn start_api_server(port: u16, state: AppState) -> anyhow::Result<()> 
         .route("/config/reload", post(reload_config))
         .route("/scan", post(scan_database))
         .route("/connections", get(get_connections))
+        .route("/stats", get(get_stats))
         .route("/schema", post(get_schema))
         .route("/logs", get(get_logs))
         .route("/audit", get(get_audit_logs))
@@ -495,6 +496,46 @@ async fn get_connections(State(state): State<AppState>) -> Json<Value> {
     let count = state.active_connections.load(Ordering::Relaxed);
     Json(json!({
         "active_connections": count
+    }))
+}
+
+/// Get application statistics (queries, masking, connections)
+async fn get_stats(State(state): State<AppState>) -> Json<Value> {
+    let stats = state.get_stats().await;
+    let history = state.get_connection_history().await;
+    let active_connections = state.active_connections.load(Ordering::Relaxed);
+    
+    Json(json!({
+        "active_connections": active_connections,
+        "total_connections": stats.total_connections,
+        "masking": {
+            "email": stats.masking.email,
+            "phone": stats.masking.phone,
+            "address": stats.masking.address,
+            "credit_card": stats.masking.credit_card,
+            "ssn": stats.masking.ssn,
+            "ip": stats.masking.ip,
+            "dob": stats.masking.dob,
+            "passport": stats.masking.passport,
+            "hash": stats.masking.hash,
+            "json": stats.masking.json,
+            "other": stats.masking.other,
+            "total": stats.masking.total()
+        },
+        "queries": {
+            "total": stats.queries.total_queries,
+            "select": stats.queries.select_count,
+            "insert": stats.queries.insert_count,
+            "update": stats.queries.update_count,
+            "delete": stats.queries.delete_count,
+            "other": stats.queries.other_count
+        },
+        "history": history.iter().map(|p| json!({
+            "timestamp": p.timestamp.to_rfc3339(),
+            "active_connections": p.active_connections,
+            "total_queries": p.total_queries,
+            "total_masked": p.total_masked
+        })).collect::<Vec<_>>()
     }))
 }
 
