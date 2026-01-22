@@ -121,7 +121,7 @@ health_check:
 
 **Files:** `src/api.rs`, `src/state.rs`
 
-### 10. Prometheus Metrics ✅
+### 10. Prometheus Metrics (Grafana template pending)
 - [x] Add `/metrics` endpoint
 - [x] Track: connections (opened/closed/rejected), queries, masked fields, latency
 - [x] Integrate with `metrics` and `metrics-exporter-prometheus` crates
@@ -308,19 +308,19 @@ audit:
 | Category | Total | Completed | Remaining |
 |----------|-------|-----------|-----------|
 | 🔴 Critical | 6 | 6 | 0 |
-| 🟡 High Priority | 5 | 5 | 0 |
-| 🟢 Medium Priority | 5 | 5 | 0 |
+| 🟡 High Priority | 5 | 4 | 1 |
+| 🟢 Medium Priority | 5 | 4 | 1 |
 | 🔵 Low Priority | 4 | 1 | 3 |
-| **Total** | **20** | **17** | **3** |
+| **Total** | **20** | **15** | **5** |
 
 ---
 
 ## Quick Wins (Can Be Done in < 1 Hour Each)
 
-1. ~~Create `.dockerignore` file~~ ✅
-2. ~~Fix `unwrap()` calls (5 locations)~~ ✅
-3. ~~Add connection timeout config~~ ✅
-4. Fetch version dynamically in settings page
+- [x] Create `.dockerignore` file
+- [x] Fix `unwrap()` calls (5 locations)
+- [x] Add connection timeout config
+- [ ] Fetch version dynamically in settings page
 
 ---
 
