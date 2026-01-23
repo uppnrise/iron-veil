@@ -10,14 +10,17 @@ import { ThemeToggle } from "@/components/theme-toggle"
 import { Label } from "@/components/ui/label"
 import { motion } from "framer-motion"
 
+const API_BASE = "http://localhost:3001"
+
 export default function SettingsPage() {
   const [config, setConfig] = useState<{ masking_enabled: boolean; rules_count: number } | null>(null)
+  const [version, setVersion] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
 
   const fetchConfig = async () => {
     try {
-      const res = await fetch("http://localhost:3001/config")
+      const res = await fetch(`${API_BASE}/config`)
       const data = await res.json()
       setConfig(data)
     } catch (error) {
@@ -27,15 +30,26 @@ export default function SettingsPage() {
     }
   }
 
+  const fetchHealth = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/health`)
+      const data = await res.json()
+      setVersion(data?.version ?? null)
+    } catch (error) {
+      console.error("Failed to fetch health", error)
+    }
+  }
+
   useEffect(() => {
     fetchConfig()
+    fetchHealth()
   }, [])
 
   const toggleMasking = async () => {
     if (!config) return
     setIsSaving(true)
     try {
-      const res = await fetch("http://localhost:3001/config", {
+      const res = await fetch(`${API_BASE}/config`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ masking_enabled: !config.masking_enabled })
@@ -51,7 +65,7 @@ export default function SettingsPage() {
 
   const handleExport = async () => {
     try {
-      const res = await fetch("http://localhost:3001/rules")
+      const res = await fetch(`${API_BASE}/rules`)
       const data = await res.json()
       
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" })
@@ -185,7 +199,7 @@ export default function SettingsPage() {
                 </div>
                 <div className="flex justify-between items-center text-sm py-2">
                   <span className="text-gray-400">Version</span>
-                  <code className="px-2 py-1 bg-gray-800 rounded text-gray-200">0.1.0</code>
+                  <code className="px-2 py-1 bg-gray-800 rounded text-gray-200">{version ?? "unknown"}</code>
                 </div>
               </CardContent>
             </Card>
