@@ -5,7 +5,8 @@ import Image from "next/image"
 import { usePathname } from "next/navigation"
 import { useQuery } from "@tanstack/react-query"
 import { cn } from "@/lib/utils"
-import { apiFetchJson } from "@/lib/api"
+import { fetchHealth, type HealthResponse } from "@/lib/api"
+import { pollingInterval, retryPolicy } from "@/lib/query"
 import {
   LayoutDashboard,
   ShieldAlert,
@@ -47,25 +48,47 @@ const routes = [
   },
 ]
 
-type HealthResponse = {
-  version?: string
-  upstream?: {
-    healthy?: boolean
-    latency_ms?: number
-  }
-}
+type UpstreamState = "unknown" | "healthy" | "unhealthy"
 
 export function Sidebar() {
   const pathname = usePathname()
-  
-  const { data: health } = useQuery<HealthResponse>({
+
+  const { data: health, isError, isLoading } = useQuery<HealthResponse>({
     queryKey: ["health"],
-    queryFn: () => apiFetchJson<HealthResponse>("/health"),
-    refetchInterval: 5000,
+    queryFn: fetchHealth,
+    refetchInterval: pollingInterval(5000),
+    refetchIntervalInBackground: false,
+    retry: retryPolicy,
   })
 
-  const isUpstreamHealthy = health?.upstream?.healthy ?? true
+  // Never assume healthy: without a successful /health response the state is unknown.
+  const upstreamState: UpstreamState =
+    isError || isLoading || typeof health?.upstream?.healthy !== "boolean"
+      ? "unknown"
+      : health.upstream.healthy
+        ? "healthy"
+        : "unhealthy"
   const latencyMs = health?.upstream?.latency_ms
+
+  const upstreamLabel =
+    upstreamState === "healthy"
+      ? "Upstream Connected"
+      : upstreamState === "unhealthy"
+        ? "Upstream Offline"
+        : isError
+          ? "API Unreachable"
+          : "Upstream Unknown"
+
+  const upstreamDetail =
+    upstreamState === "unknown"
+      ? isLoading
+        ? "Checking..."
+        : "Status unavailable"
+      : latencyMs !== undefined
+        ? `${latencyMs}ms latency`
+        : health?.version
+          ? `v${health.version}`
+          : "—"
 
   return (
     <div className="space-y-4 py-4 flex flex-col h-full bg-[#111827] text-white border-r border-gray-800">
@@ -105,14 +128,26 @@ export function Sidebar() {
       <div className="px-3 py-2">
         <div className="bg-slate-900/50 rounded-xl p-4 border border-slate-800">
             <div className="flex items-center gap-x-2">
-                <Database className={cn("w-5 h-5", isUpstreamHealthy ? "text-emerald-500" : "text-red-500")} />
+                <Database
+                  className={cn(
+                    "w-5 h-5",
+                    upstreamState === "healthy" && "text-emerald-500",
+                    upstreamState === "unhealthy" && "text-red-500",
+                    upstreamState === "unknown" && "text-gray-500"
+                  )}
+                />
                 <div className="text-xs text-zinc-400">
-                    <p className={cn("font-semibold", isUpstreamHealthy ? "text-white" : "text-red-400")}>
-                      {isUpstreamHealthy ? "Upstream Connected" : "Upstream Offline"}
+                    <p
+                      className={cn(
+                        "font-semibold",
+                        upstreamState === "healthy" && "text-white",
+                        upstreamState === "unhealthy" && "text-red-400",
+                        upstreamState === "unknown" && "text-gray-400"
+                      )}
+                    >
+                      {upstreamLabel}
                     </p>
-                    <p>
-                      {latencyMs !== undefined ? `${latencyMs}ms latency` : health?.version ? `v${health.version}` : "Connecting..."}
-                    </p>
+                    <p>{upstreamDetail}</p>
                 </div>
             </div>
         </div>

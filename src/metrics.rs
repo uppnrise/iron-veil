@@ -8,7 +8,7 @@
 //! - Upstream pool usage and wait time
 
 use metrics::{counter, gauge, histogram};
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use std::sync::OnceLock;
 
 static METRICS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
@@ -18,7 +18,21 @@ static METRICS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 pub fn init_metrics() -> PrometheusHandle {
     METRICS_HANDLE
         .get_or_init(|| {
+            // Without explicit buckets, metrics-exporter-prometheus exports
+            // every histogram! as a summary with no _bucket series, and the
+            // shipped Grafana histogram_quantile panels render "No data".
             PrometheusBuilder::new()
+                .set_buckets(&[
+                    0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+                ])
+                .expect("bucket list is a non-empty constant")
+                .set_buckets_for_metric(
+                    Matcher::Full("ironveil_upstream_health_check_latency_ms".to_string()),
+                    &[
+                        1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0,
+                    ],
+                )
+                .expect("bucket list is a non-empty constant")
                 .install_recorder()
                 .expect("Failed to install Prometheus recorder")
         })
@@ -41,9 +55,13 @@ pub fn record_connection_rejected(reason: &str) {
     counter!("ironveil_connections_rejected_total", "reason" => reason.to_string()).increment(1);
 }
 
-/// Record query processed
-pub fn record_query_processed(protocol: &str, duration_secs: f64) {
+/// Record that a query was seen (counter only).
+pub fn record_query_processed(protocol: &str) {
     counter!("ironveil_queries_total", "protocol" => protocol.to_string()).increment(1);
+}
+
+/// Record the round trip from the client's query to the result-set terminator.
+pub fn record_query_duration(protocol: &str, duration_secs: f64) {
     histogram!("ironveil_query_duration_seconds", "protocol" => protocol.to_string())
         .record(duration_secs);
 }
@@ -56,6 +74,17 @@ pub fn record_fields_masked(count: u64) {
 /// Record masking error
 pub fn record_masking_error() {
     counter!("ironveil_masking_errors_total").increment(1);
+}
+
+/// Record a rejected binary-protocol (prepared statement) command.
+/// The MySQL binary protocol is unsupported: rows would bypass masking.
+pub fn record_binary_protocol_rejected() {
+    counter!("ironveil_binary_protocol_rejected_total").increment(1);
+}
+
+/// Record PostgreSQL COPY data forwarded without masking (unmasked path).
+pub fn record_copy_passthrough() {
+    counter!("ironveil_copy_passthrough_total").increment(1);
 }
 
 /// Record upstream health check
@@ -107,11 +136,29 @@ mod tests {
     use super::init_metrics;
 
     #[test]
+    fn test_histograms_export_prometheus_bucket_series() {
+        // Without explicit buckets the exporter emits summaries with no
+        // _bucket series, and every histogram_quantile panel in the shipped
+        // Grafana dashboard renders "No data".
+        let handle = init_metrics();
+        super::record_query_duration("postgres", 0.042);
+        let rendered = handle.render();
+        assert!(
+            rendered.contains("ironveil_query_duration_seconds_bucket"),
+            "query duration must export _bucket series, got:\n{rendered}"
+        );
+        assert!(rendered.contains("# TYPE ironveil_query_duration_seconds histogram"));
+    }
+
+    #[test]
     fn test_metrics_init_is_idempotent() {
         let first = init_metrics();
         let second = init_metrics();
 
-        // Both handles should point to the same underlying registry.
-        assert_eq!(first.render(), second.render());
+        // Both handles must observe the same underlying registry. (Comparing
+        // two renders directly is racy: concurrent tests record metrics.)
+        super::record_masking_error();
+        assert!(first.render().contains("ironveil_masking_errors_total"));
+        assert!(second.render().contains("ironveil_masking_errors_total"));
     }
 }

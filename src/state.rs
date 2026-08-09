@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicUsize, Ordering},
 };
 use tokio::sync::RwLock;
 
@@ -21,8 +21,10 @@ pub struct LogEntry {
     pub details: Option<serde_json::Value>,
 }
 
-/// Upstream health status information
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Upstream health status information.
+/// Defaults to unhealthy/unknown: reporting healthy before the first probe
+/// let CI gates and readiness probes pass against a dead upstream.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HealthStatus {
     pub healthy: bool,
     pub last_check: Option<DateTime<Utc>>,
@@ -30,19 +32,6 @@ pub struct HealthStatus {
     pub consecutive_failures: u32,
     pub consecutive_successes: u32,
     pub latency_ms: Option<u64>,
-}
-
-impl Default for HealthStatus {
-    fn default() -> Self {
-        Self {
-            healthy: true, // Assume healthy until proven otherwise
-            last_check: None,
-            last_error: None,
-            consecutive_failures: 0,
-            consecutive_successes: 0,
-            latency_ms: None,
-        }
-    }
 }
 
 /// Database protocol type for upstream connection
@@ -156,7 +145,6 @@ pub struct AppState {
     pub config_path: Arc<String>,
     pub active_connections: Arc<AtomicUsize>,
     pub logs: Arc<RwLock<VecDeque<LogEntry>>>,
-    pub upstream_healthy: Arc<AtomicBool>,
     pub health_status: Arc<RwLock<HealthStatus>>,
     pub metrics_handle: Option<Arc<PrometheusHandle>>,
     /// Upstream database host for scanning
@@ -171,6 +159,62 @@ pub struct AppState {
     pub stats: Arc<RwLock<AppStats>>,
     /// Connection history for charts (last 60 data points)
     pub connection_history: Arc<RwLock<VecDeque<ConnectionDataPoint>>>,
+    /// Key for the deterministic masking functions. Derived from
+    /// `masking_secret` when configured, otherwise random per process.
+    masking_key: Arc<std::sync::RwLock<[u8; 32]>>,
+}
+
+fn to_audit_config(cfg: &crate::config::AuditConfig) -> crate::audit::AuditConfig {
+    crate::audit::AuditConfig {
+        enabled: cfg.enabled,
+        log_to_stdout: cfg.log_to_stdout,
+        log_file: cfg.log_file.clone(),
+        rotation_enabled: cfg.rotation_enabled,
+        max_file_size_bytes: cfg.max_file_size_bytes,
+        max_rotated_files: cfg.max_rotated_files,
+        events: cfg
+            .events
+            .iter()
+            .map(|e| match e {
+                crate::config::AuditEventType::AuthAttempt => {
+                    crate::audit::AuditEventType::AuthAttempt
+                }
+                crate::config::AuditEventType::ConfigChange => {
+                    crate::audit::AuditEventType::ConfigChange
+                }
+                crate::config::AuditEventType::RuleAdded => crate::audit::AuditEventType::RuleAdded,
+                crate::config::AuditEventType::RuleDeleted => {
+                    crate::audit::AuditEventType::RuleDeleted
+                }
+                crate::config::AuditEventType::RulesImported => {
+                    crate::audit::AuditEventType::RulesImported
+                }
+                crate::config::AuditEventType::ConfigReload => {
+                    crate::audit::AuditEventType::ConfigReload
+                }
+                crate::config::AuditEventType::DatabaseScan => {
+                    crate::audit::AuditEventType::DatabaseScan
+                }
+                crate::config::AuditEventType::SchemaQuery => {
+                    crate::audit::AuditEventType::SchemaQuery
+                }
+            })
+            .collect(),
+    }
+}
+
+fn derive_masking_key(secret: Option<&str>) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    match secret {
+        Some(secret) if !secret.is_empty() => Sha256::digest(secret.as_bytes()).into(),
+        _ => {
+            tracing::warn!(
+                "masking_secret is not configured; using a random per-process key. \
+                 Masked output will not be stable across restarts."
+            );
+            rand::random()
+        }
+    }
 }
 
 impl AppState {
@@ -182,60 +226,21 @@ impl AppState {
         db_protocol: DbProtocol,
     ) -> Self {
         // Create audit logger from config
-        let audit_logger = config
-            .audit
-            .as_ref()
-            .map(|cfg| {
-                AuditLogger::new(crate::audit::AuditConfig {
-                    enabled: cfg.enabled,
-                    log_to_stdout: cfg.log_to_stdout,
-                    log_file: cfg.log_file.clone(),
-                    rotation_enabled: cfg.rotation_enabled,
-                    max_file_size_bytes: cfg.max_file_size_bytes,
-                    max_rotated_files: cfg.max_rotated_files,
-                    events: cfg
-                        .events
-                        .iter()
-                        .map(|e| match e {
-                            crate::config::AuditEventType::AuthAttempt => {
-                                crate::audit::AuditEventType::AuthAttempt
-                            }
-                            crate::config::AuditEventType::ConfigChange => {
-                                crate::audit::AuditEventType::ConfigChange
-                            }
-                            crate::config::AuditEventType::RuleAdded => {
-                                crate::audit::AuditEventType::RuleAdded
-                            }
-                            crate::config::AuditEventType::RuleDeleted => {
-                                crate::audit::AuditEventType::RuleDeleted
-                            }
-                            crate::config::AuditEventType::RulesImported => {
-                                crate::audit::AuditEventType::RulesImported
-                            }
-                            crate::config::AuditEventType::ConfigReload => {
-                                crate::audit::AuditEventType::ConfigReload
-                            }
-                            crate::config::AuditEventType::DatabaseScan => {
-                                crate::audit::AuditEventType::DatabaseScan
-                            }
-                            crate::config::AuditEventType::SchemaQuery => {
-                                crate::audit::AuditEventType::SchemaQuery
-                            }
-                            crate::config::AuditEventType::ApiAccess => {
-                                crate::audit::AuditEventType::ApiAccess
-                            }
-                        })
-                        .collect(),
-                })
-            })
-            .unwrap_or_else(|| AuditLogger::new(crate::audit::AuditConfig::default()));
+        let audit_logger = AuditLogger::new(
+            config
+                .audit
+                .as_ref()
+                .map(to_audit_config)
+                .unwrap_or_default(),
+        );
+
+        let masking_key = derive_masking_key(config.masking_secret.as_deref());
 
         Self {
             config: Arc::new(RwLock::new(config)),
             config_path: Arc::new(config_path),
             active_connections: Arc::new(AtomicUsize::new(0)),
             logs: Arc::new(RwLock::new(VecDeque::with_capacity(100))),
-            upstream_healthy: Arc::new(AtomicBool::new(true)),
             health_status: Arc::new(RwLock::new(HealthStatus::default())),
             metrics_handle: None,
             upstream_host: Arc::new(upstream_host),
@@ -244,7 +249,16 @@ impl AppState {
             audit_logger: Arc::new(audit_logger),
             stats: Arc::new(RwLock::new(AppStats::default())),
             connection_history: Arc::new(RwLock::new(VecDeque::with_capacity(60))),
+            masking_key: Arc::new(std::sync::RwLock::new(masking_key)),
         }
+    }
+
+    /// Current masking key (copied out; the key is only 32 bytes).
+    pub fn masking_key(&self) -> [u8; 32] {
+        *self
+            .masking_key
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Create a new AppState with default upstream settings (for testing)
@@ -264,12 +278,24 @@ impl AppState {
         self
     }
 
-    /// Save current config to the config file
-    pub async fn save_config(&self) -> Result<(), std::io::Error> {
-        let config = self.config.read().await;
-        let yaml = serde_yaml::to_string(&*config)
+    /// Atomically persist a new config, then swap it into live state.
+    /// Live state is untouched when persistence fails, so the on-disk policy
+    /// can never silently diverge from runtime behaviour.
+    pub async fn commit_config(&self, new_config: AppConfig) -> Result<(), std::io::Error> {
+        let yaml = serde_yaml_ng::to_string(&new_config)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(&*self.config_path, yaml)
+        let path = self.config_path.as_ref().clone();
+        tokio::task::spawn_blocking(move || {
+            let tmp = format!("{}.tmp", path);
+            std::fs::write(&tmp, yaml)?;
+            std::fs::rename(&tmp, &path)
+        })
+        .await
+        .map_err(std::io::Error::other)??;
+
+        let mut config = self.config.write().await;
+        *config = new_config;
+        Ok(())
     }
 
     pub async fn add_log(&self, entry: LogEntry) {
@@ -312,10 +338,8 @@ impl AppState {
         // Update healthy status based on thresholds
         if status.consecutive_failures >= unhealthy_threshold {
             status.healthy = false;
-            self.upstream_healthy.store(false, Ordering::Relaxed);
         } else if status.consecutive_successes >= healthy_threshold {
             status.healthy = true;
-            self.upstream_healthy.store(true, Ordering::Relaxed);
         }
     }
 
@@ -329,6 +353,66 @@ impl AppState {
             .map_err(|e| format!("Failed to load config from {}: {}", path, e))?;
 
         let rules_count = new_config.rules.len();
+
+        // A reloaded masking_secret takes effect immediately; when the new
+        // config has none, keep the existing key so determinism is preserved.
+        if let Some(secret) = new_config.masking_secret.as_deref()
+            && !secret.is_empty()
+        {
+            let new_key = derive_masking_key(Some(secret));
+            let mut key = self
+                .masking_key
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *key = new_key;
+        }
+
+        // Re-apply the reloadable audit section; warn about sections that
+        // only take effect after a restart so a reload cannot silently claim
+        // to have applied them.
+        self.audit_logger
+            .apply_config(
+                new_config
+                    .audit
+                    .as_ref()
+                    .map(to_audit_config)
+                    .unwrap_or_default(),
+            )
+            .await;
+
+        {
+            let current = self.config.read().await;
+            let mut restart_required = Vec::new();
+            if serde_yaml_ng::to_string(&current.tls).ok()
+                != serde_yaml_ng::to_string(&new_config.tls).ok()
+            {
+                restart_required.push("tls");
+            }
+            if current.upstream_tls != new_config.upstream_tls {
+                restart_required.push("upstream_tls");
+            }
+            if serde_yaml_ng::to_string(&current.limits).ok()
+                != serde_yaml_ng::to_string(&new_config.limits).ok()
+            {
+                restart_required.push("limits");
+            }
+            if serde_yaml_ng::to_string(&current.telemetry).ok()
+                != serde_yaml_ng::to_string(&new_config.telemetry).ok()
+            {
+                restart_required.push("telemetry");
+            }
+            if serde_yaml_ng::to_string(&current.api).ok()
+                != serde_yaml_ng::to_string(&new_config.api).ok()
+            {
+                restart_required.push("api");
+            }
+            if !restart_required.is_empty() {
+                tracing::warn!(
+                    sections = ?restart_required,
+                    "reloaded config changes sections that only take effect after a restart"
+                );
+            }
+        }
 
         // Update the config
         {
@@ -346,19 +430,40 @@ impl AppState {
 
     /// Record a masking operation by strategy
     pub async fn record_masking(&self, strategy: &str) {
-        let mut stats = self.stats.write().await;
-        stats.masking.increment(strategy);
-        drop(stats);
-        metrics::record_fields_masked(1);
+        self.record_masking_batch(std::slice::from_ref(&strategy))
+            .await;
     }
 
-    /// Record a query by type (SELECT, INSERT, UPDATE, DELETE, etc.)
+    /// Record every masked field of a row under a single lock acquisition.
+    /// One process-global write lock per masked *field* serialized every
+    /// concurrent connection on the packet hot path.
+    pub async fn record_masking_batch(&self, strategies: &[&str]) {
+        if strategies.is_empty() {
+            return;
+        }
+        {
+            let mut stats = self.stats.write().await;
+            for strategy in strategies {
+                stats.masking.increment(strategy);
+            }
+        }
+        metrics::record_fields_masked(strategies.len() as u64);
+    }
+
+    /// Record a query by type (SELECT, INSERT, UPDATE, DELETE, etc.).
+    /// Counting only — latency is recorded by `record_query_latency` when the
+    /// result set terminates. Timing this call measured a lock acquisition,
+    /// not the upstream round trip, so the latency panels read ~0 forever.
     pub async fn record_query(&self, query_type: &str) {
-        let started_at = std::time::Instant::now();
         let mut stats = self.stats.write().await;
         stats.queries.record_query(query_type);
         drop(stats);
-        metrics::record_query_processed(
+        metrics::record_query_processed(self.db_protocol.metrics_label());
+    }
+
+    /// Record the observed round trip for a completed query.
+    pub fn record_query_latency(&self, started_at: std::time::Instant) {
+        metrics::record_query_duration(
             self.db_protocol.metrics_label(),
             started_at.elapsed().as_secs_f64(),
         );
@@ -496,13 +601,7 @@ mod tests {
         let config = AppConfig {
             masking_enabled: true,
             rules: vec![],
-            tls: None,
-            upstream_tls: false,
-            telemetry: None,
-            api: None,
-            limits: None,
-            health_check: None,
-            audit: None,
+            ..Default::default()
         };
         let state = AppState::new_for_test(config, "proxy.yaml".to_string());
 
@@ -521,13 +620,7 @@ mod tests {
         let config = AppConfig {
             masking_enabled: true,
             rules: vec![],
-            tls: None,
-            upstream_tls: false,
-            telemetry: None,
-            api: None,
-            limits: None,
-            health_check: None,
-            audit: None,
+            ..Default::default()
         };
         let state = AppState::new_for_test(config, "proxy.yaml".to_string());
 
@@ -546,13 +639,7 @@ mod tests {
         let config = AppConfig {
             masking_enabled: true,
             rules: vec![],
-            tls: None,
-            upstream_tls: false,
-            telemetry: None,
-            api: None,
-            limits: None,
-            health_check: None,
-            audit: None,
+            ..Default::default()
         };
         let state = AppState::new_for_test(config, "proxy.yaml".to_string());
 
@@ -569,13 +656,7 @@ mod tests {
         let config = AppConfig {
             masking_enabled: true,
             rules: vec![],
-            tls: None,
-            upstream_tls: false,
-            telemetry: None,
-            api: None,
-            limits: None,
-            health_check: None,
-            audit: None,
+            ..Default::default()
         };
         let state = AppState::new_for_test(config, "proxy.yaml".to_string());
 
@@ -597,13 +678,7 @@ mod tests {
         let config = AppConfig {
             masking_enabled: true,
             rules: vec![],
-            tls: None,
-            upstream_tls: false,
-            telemetry: None,
-            api: None,
-            limits: None,
-            health_check: None,
-            audit: None,
+            ..Default::default()
         };
         let state = AppState::new_for_test(config, "proxy.yaml".to_string());
 
@@ -622,13 +697,7 @@ mod tests {
         let config = AppConfig {
             masking_enabled: true,
             rules: vec![],
-            tls: None,
-            upstream_tls: false,
-            telemetry: None,
-            api: None,
-            limits: None,
-            health_check: None,
-            audit: None,
+            ..Default::default()
         };
         let state = AppState::new_for_test(config, "proxy.yaml".to_string()).with_metrics(handle);
 
@@ -644,6 +713,7 @@ mod tests {
         );
 
         state.record_query("SELECT").await;
+        state.record_query_latency(std::time::Instant::now());
 
         let after = state
             .metrics_handle
@@ -661,7 +731,7 @@ mod tests {
         );
         assert!(
             after_duration_count > before_duration_count,
-            "query duration metric should be emitted when recording query stats"
+            "query duration metric should be emitted when a query round trip completes"
         );
     }
 
@@ -671,13 +741,7 @@ mod tests {
         let config = AppConfig {
             masking_enabled: true,
             rules: vec![],
-            tls: None,
-            upstream_tls: false,
-            telemetry: None,
-            api: None,
-            limits: None,
-            health_check: None,
-            audit: None,
+            ..Default::default()
         };
         let state = AppState::new_for_test(config, "proxy.yaml".to_string()).with_metrics(handle);
 
@@ -700,5 +764,84 @@ mod tests {
             after_total > before_total,
             "fields-masked counter should be emitted when recording masking stats"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Upstream health threshold state machine. It alone decides whether
+    // /health answers 200 or 503 (and drives every load-balancer and
+    // Kubernetes probe), and had no coverage at all.
+    // ------------------------------------------------------------------
+
+    fn health_state(unhealthy_threshold: u32, healthy_threshold: u32) -> AppState {
+        AppState::new_for_test(
+            AppConfig {
+                health_check: Some(crate::config::HealthCheckConfig {
+                    enabled: true,
+                    interval_secs: 10,
+                    timeout_secs: 5,
+                    unhealthy_threshold,
+                    healthy_threshold,
+                }),
+                ..Default::default()
+            },
+            "proxy.yaml".to_string(),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_health_starts_unknown_and_flips_only_on_threshold() {
+        let state = health_state(3, 1);
+        assert!(
+            !state.health_status.read().await.healthy,
+            "health must be unknown (not healthy) before the first probe"
+        );
+
+        state.update_health_status(true, Some(1), None).await;
+        assert!(state.health_status.read().await.healthy);
+
+        // Two failures are not enough with unhealthy_threshold: 3
+        state
+            .update_health_status(false, None, Some("boom".into()))
+            .await;
+        assert!(state.health_status.read().await.healthy);
+        state
+            .update_health_status(false, None, Some("boom".into()))
+            .await;
+        assert!(state.health_status.read().await.healthy);
+
+        // The third flips it
+        state
+            .update_health_status(false, None, Some("boom".into()))
+            .await;
+        let status = state.health_status.read().await;
+        assert!(!status.healthy);
+        assert_eq!(status.consecutive_failures, 3);
+        assert_eq!(status.last_error.as_deref(), Some("boom"));
+    }
+
+    #[tokio::test]
+    async fn test_health_recovers_after_healthy_threshold_and_resets_counters() {
+        let state = health_state(2, 2);
+
+        state
+            .update_health_status(false, None, Some("down".into()))
+            .await;
+        state
+            .update_health_status(false, None, Some("down".into()))
+            .await;
+        assert!(!state.health_status.read().await.healthy);
+
+        // One success is not enough with healthy_threshold: 2, but it must
+        // reset the failure counter.
+        state.update_health_status(true, Some(2), None).await;
+        {
+            let status = state.health_status.read().await;
+            assert!(!status.healthy);
+            assert_eq!(status.consecutive_failures, 0);
+            assert!(status.last_error.is_none());
+        }
+
+        state.update_health_status(true, Some(2), None).await;
+        assert!(state.health_status.read().await.healthy);
     }
 }

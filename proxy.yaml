@@ -1,4 +1,17 @@
+# Iron Veil proxy configuration.
+# See README.md for the full reference of every section.
+
 masking_enabled: true
+
+# Secret that keys the deterministic masking output (fake-data seeds and the
+# `hash` strategy). Set this (or the IRONVEIL_MASKING_SECRET env var) so masked
+# values are stable across restarts without being computable by anyone who
+# lacks the secret. When unset, a random per-process key is used.
+# masking_secret: change-me
+
+# Explicit masking rules: table (optional) + column + strategy.
+# Strategies: email, phone, address, name, text, credit_card, ssn, ip, dob,
+# passport, hash, json.
 rules:
 - table: users
   column: email
@@ -6,12 +19,15 @@ rules:
 - table: users
   column: phone_number
   strategy: phone
-- table: null
-  column: address
-  strategy: address
-- table: null
-  column: test
-  strategy: email
+
+# Heuristic (rule-less) detection for columns without an explicit rule.
+# Only the listed detectors run. credit_card, ip, dob and passport are
+# deliberately NOT enabled by default: they rewrite legitimate values
+# (order numbers, host addresses, every date column) on real schemas.
+heuristics:
+  enabled: true
+  types: [email, phone, ssn]
+
 tls:
   enabled: false
   cert_path: certs/server.crt
@@ -21,10 +37,13 @@ telemetry:
   enabled: false
   otlp_endpoint: http://localhost:4317
   service_name: iron-veil
+# Management API: binds 127.0.0.1 unless api.bind is set. Binding a
+# non-loopback address requires api_key or jwt_secret.
 api: null
 limits:
-  upstream_pool_size: 1
-  upstream_pool_wait_timeout_secs: 2
+  max_connections: 1000
+  upstream_pool_size: 100
+  upstream_pool_wait_timeout_secs: 5
   connect_timeout_secs: 30
   idle_timeout_secs: 300
 health_check:
@@ -35,7 +54,7 @@ health_check:
   healthy_threshold: 1
 audit:
   enabled: true
-  log_to_stdout: false
+  log_to_stdout: true
   log_file: null
   rotation_enabled: true
   max_file_size_bytes: 10485760

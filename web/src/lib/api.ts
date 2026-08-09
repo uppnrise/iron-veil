@@ -1,6 +1,15 @@
 const DEFAULT_API_BASE_URL = "http://localhost:3001"
-const API_KEY_STORAGE_KEY = "ironveil.api_key"
-const JWT_STORAGE_KEY = "ironveil.jwt"
+const DEFAULT_REQUEST_TIMEOUT_MS = 15_000
+
+const AUTH_MODE_STORAGE_KEY = "ironveil.auth_mode"
+const AUTH_CREDENTIAL_STORAGE_KEY = "ironveil.auth_credential"
+
+export type AuthMode = "none" | "api_key" | "bearer"
+
+export interface StoredAuth {
+  mode: AuthMode
+  credential: string
+}
 
 type ApiErrorOptions = {
   status: number
@@ -70,27 +79,70 @@ function headersToRecord(headers?: HeadersInit): Record<string, string> {
   return { ...headers }
 }
 
+function isAuthMode(value: unknown): value is AuthMode {
+  return value === "none" || value === "api_key" || value === "bearer"
+}
+
+/**
+ * Credentials are kept in sessionStorage only (cleared when the tab closes).
+ * They are never read from build-time environment variables: NEXT_PUBLIC_*
+ * values are inlined into the public JS bundle and must not carry secrets.
+ */
+export function getStoredAuth(): StoredAuth {
+  if (typeof window === "undefined") {
+    return { mode: "none", credential: "" }
+  }
+
+  const mode = sessionStorage.getItem(AUTH_MODE_STORAGE_KEY)
+  const credential = sessionStorage.getItem(AUTH_CREDENTIAL_STORAGE_KEY) ?? ""
+
+  if (!isAuthMode(mode) || mode === "none" || !credential) {
+    return { mode: "none", credential: "" }
+  }
+
+  return { mode, credential }
+}
+
+export function setStoredAuth(mode: AuthMode, credential: string): void {
+  if (typeof window === "undefined") {
+    return
+  }
+
+  const trimmed = credential.trim()
+  if (mode === "none" || !trimmed) {
+    clearStoredAuth()
+    return
+  }
+
+  sessionStorage.setItem(AUTH_MODE_STORAGE_KEY, mode)
+  sessionStorage.setItem(AUTH_CREDENTIAL_STORAGE_KEY, trimmed)
+}
+
+export function clearStoredAuth(): void {
+  if (typeof window === "undefined") {
+    return
+  }
+
+  sessionStorage.removeItem(AUTH_MODE_STORAGE_KEY)
+  sessionStorage.removeItem(AUTH_CREDENTIAL_STORAGE_KEY)
+}
+
+/**
+ * Builds exactly zero or one auth header depending on the stored auth mode.
+ * X-API-Key and Authorization are mutually exclusive by construction.
+ */
 function getAuthHeaders(): Record<string, string> {
-  const envApiKey = process.env.NEXT_PUBLIC_IRONVEIL_API_KEY
-  const envBearerToken = process.env.NEXT_PUBLIC_IRONVEIL_BEARER_TOKEN
+  const { mode, credential } = getStoredAuth()
 
-  let apiKey = envApiKey
-  let bearerToken = envBearerToken
-
-  if (typeof window !== "undefined") {
-    apiKey = localStorage.getItem(API_KEY_STORAGE_KEY) || apiKey
-    bearerToken = localStorage.getItem(JWT_STORAGE_KEY) || bearerToken
+  if (mode === "api_key") {
+    return { "X-API-Key": credential }
   }
 
-  const authHeaders: Record<string, string> = {}
-  if (apiKey) {
-    authHeaders["X-API-Key"] = apiKey
-  }
-  if (bearerToken) {
-    authHeaders.Authorization = `Bearer ${bearerToken}`
+  if (mode === "bearer") {
+    return { Authorization: `Bearer ${credential}` }
   }
 
-  return authHeaders
+  return {}
 }
 
 export function getApiBaseUrl(): string {
@@ -118,11 +170,24 @@ export async function apiFetch(path: string, init?: RequestInit): Promise<Respon
     requestInit.headers = headers
   }
 
-  if (Object.keys(requestInit).length === 0) {
-    return fetch(buildApiUrl(path))
+  // Abort hung requests so failures surface instead of hanging forever.
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+  if (!requestInit.signal && typeof AbortController !== "undefined") {
+    const controller = new AbortController()
+    timeoutId = setTimeout(() => controller.abort(), DEFAULT_REQUEST_TIMEOUT_MS)
+    requestInit.signal = controller.signal
   }
 
-  return fetch(buildApiUrl(path), requestInit)
+  try {
+    if (Object.keys(requestInit).length === 0) {
+      return await fetch(buildApiUrl(path))
+    }
+    return await fetch(buildApiUrl(path), requestInit)
+  } finally {
+    if (timeoutId !== undefined) {
+      clearTimeout(timeoutId)
+    }
+  }
 }
 
 export async function apiFetchJson<T = unknown>(path: string, init?: RequestInit): Promise<T> {
@@ -146,4 +211,33 @@ export async function apiFetchJson<T = unknown>(path: string, init?: RequestInit
   }
 
   return payload as T
+}
+
+export interface HealthResponse {
+  status?: string
+  version?: string
+  upstream?: {
+    host?: string
+    port?: number
+    protocol?: string
+    healthy?: boolean
+    latency_ms?: number
+    last_error?: string | null
+  }
+}
+
+/**
+ * GET /health returns 503 with a "degraded" body when the upstream database
+ * is unhealthy. That is still useful data, so unwrap it from the ApiError
+ * instead of treating it as an unreachable API.
+ */
+export async function fetchHealth(): Promise<HealthResponse> {
+  try {
+    return await apiFetchJson<HealthResponse>("/health")
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 503 && isRecord(error.payload)) {
+      return error.payload as HealthResponse
+    }
+    throw error
+  }
 }

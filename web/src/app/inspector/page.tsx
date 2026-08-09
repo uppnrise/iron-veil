@@ -1,8 +1,11 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState } from "react"
+import { useQuery } from "@tanstack/react-query"
 import { Activity } from "lucide-react"
 import { apiFetchJson } from "@/lib/api"
+import { errorMessage, pollingInterval, retryPolicy } from "@/lib/query"
+import { cn } from "@/lib/utils"
 
 interface LogEntry {
   id: string
@@ -17,28 +20,34 @@ interface LogDetail {
   column_idx: number
   column_name?: string
   strategy: string
-  original: string
-  masked: string
+  masked?: string
 }
 
 export default function InspectorPage() {
-  const [logs, setLogs] = useState<LogEntry[]>([])
   const [selectedLog, setSelectedLog] = useState<string | null>(null)
 
-  useEffect(() => {
-    const fetchLogs = async () => {
-      try {
-        const data = await apiFetchJson<{ logs?: LogEntry[] }>("/logs")
-        setLogs(data.logs ?? [])
-      } catch (error) {
-        console.error("Failed to fetch logs", error)
-      }
-    }
+  const {
+    data,
+    isError,
+    error,
+    isPending,
+    isFetching,
+  } = useQuery<{ logs?: LogEntry[] }>({
+    queryKey: ["logs"],
+    queryFn: () => apiFetchJson<{ logs?: LogEntry[] }>("/logs"),
+    refetchInterval: pollingInterval(2000),
+    refetchIntervalInBackground: false,
+    retry: retryPolicy,
+  })
 
-    fetchLogs()
-    const interval = setInterval(fetchLogs, 2000)
-    return () => clearInterval(interval)
-  }, [])
+  const logs = data?.logs ?? []
+
+  // Drive the badge from actual poll state instead of a static "Live" label.
+  const feedState = isError
+    ? { label: "Disconnected", dot: "bg-red-500", text: "text-red-400", pulse: false }
+    : isPending
+      ? { label: "Connecting…", dot: "bg-yellow-500", text: "text-yellow-400", pulse: true }
+      : { label: isFetching ? "Live (updating…)" : "Live", dot: "bg-green-500", text: "text-gray-400", pulse: true }
 
   return (
     <div className="p-8 space-y-8 bg-black min-h-screen text-white">
@@ -49,11 +58,18 @@ export default function InspectorPage() {
             Real-time view of database queries and masking operations.
           </p>
         </div>
-        <div className="flex items-center space-x-2 text-sm text-gray-500">
-          <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-          <span>Live</span>
+        <div className={cn("flex items-center space-x-2 text-sm", feedState.text)}>
+          <div className={cn("w-2 h-2 rounded-full", feedState.dot, feedState.pulse && "animate-pulse")} />
+          <span>{feedState.label}</span>
         </div>
       </div>
+
+      {isError && (
+        <div className="rounded-lg border border-red-700/40 bg-red-900/20 px-4 py-3 text-red-300" role="alert">
+          Failed to load event log: {errorMessage(error, "the management API is unreachable.")}
+          {" "}Events shown below may be stale.
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-[calc(100vh-200px)]">
         {/* Log List */}
@@ -74,7 +90,7 @@ export default function InspectorPage() {
               >
                 <div className="flex items-center justify-between mb-2">
                   <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
-                    log.event_type === "DataMasked" 
+                    log.event_type === "DataMasked"
                       ? "bg-purple-500/20 text-purple-300"
                       : "bg-blue-500/20 text-blue-300"
                   }`}>
@@ -89,9 +105,14 @@ export default function InspectorPage() {
                 </p>
               </div>
             ))}
-            {logs.length === 0 && (
+            {logs.length === 0 && !isError && (
               <div className="text-center py-10 text-gray-500">
-                No events captured yet.
+                {isPending ? "Loading events…" : "No events captured yet."}
+              </div>
+            )}
+            {logs.length === 0 && isError && (
+              <div className="text-center py-10 text-red-400">
+                Event log unavailable.
               </div>
             )}
           </div>
@@ -136,22 +157,27 @@ export default function InspectorPage() {
                               <tr>
                                 <th className="px-4 py-2">Column</th>
                                 <th className="px-4 py-2">Strategy</th>
-                                <th className="px-4 py-2">Original (Preview)</th>
-                                <th className="px-4 py-2">Masked</th>
+                                <th className="px-4 py-2">Masked Value</th>
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-gray-800">
                               {log.details.map((detail: LogDetail, idx: number) => (
                                 <tr key={idx}>
-                                  <td className="px-4 py-2 text-gray-300">{detail.column_idx}</td>
+                                  <td className="px-4 py-2 text-gray-300">
+                                    {detail.column_name ?? detail.column_idx}
+                                  </td>
                                   <td className="px-4 py-2 text-purple-400">{detail.strategy}</td>
-                                  <td className="px-4 py-2 text-red-400 font-mono">{detail.original}</td>
-                                  <td className="px-4 py-2 text-green-400 font-mono">{detail.masked}</td>
+                                  <td className="px-4 py-2 text-green-400 font-mono">
+                                    {detail.masked ?? "—"}
+                                  </td>
                                 </tr>
                               ))}
                             </tbody>
                           </table>
                         </div>
+                        <p className="text-xs text-gray-600">
+                          Original values are not exposed by the management API.
+                        </p>
                       </div>
                     )}
                   </div>

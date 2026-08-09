@@ -313,7 +313,7 @@ audit:
 
 ---
 
-## 🧭 Strategic Backlog (From FEATURE_IDEAS.md)
+## 🧭 Strategic Backlog
 
 These are high-value future enhancements that extend the original production-readiness scope.
 

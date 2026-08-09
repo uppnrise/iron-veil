@@ -13,86 +13,15 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select } from "@/components/ui/select"
-import { Badge } from "@/components/ui/badge"
-import { ArrowRight, FlaskConical, Sparkles, RefreshCw, Save } from "lucide-react"
+import { ArrowRight, FlaskConical, Sparkles, RefreshCw, Save, Loader2, Info } from "lucide-react"
 import { motion, AnimatePresence } from "framer-motion"
+import { STRATEGIES, PREVIEW_DISCLAIMER, previewMask } from "@/lib/masking-preview"
+import { errorMessage } from "@/lib/query"
 
 interface RuleTestDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
-  onSaveRule?: (rule: { table: string; column: string; strategy: string }) => void
-}
-
-const STRATEGIES = [
-  { value: "email", label: "Email", example: "john.doe@company.com" },
-  { value: "phone", label: "Phone", example: "+1 (555) 123-4567" },
-  { value: "credit_card", label: "Credit Card", example: "4532-1234-5678-9012" },
-  { value: "address", label: "Address", example: "123 Main St, New York, NY" },
-  { value: "hash", label: "Hash (SHA-256)", example: "Any sensitive text" },
-  { value: "json", label: "JSON Fields", example: '{"ssn": "123-45-6789"}' },
-]
-
-// Client-side masking preview functions
-const maskEmail = (email: string): string => {
-  const parts = email.split("@")
-  if (parts.length !== 2) return "***@***.***"
-  const name = parts[0]
-  const domain = parts[1].split(".")
-  const maskedName = name.length > 2 
-    ? name[0] + "*".repeat(name.length - 2) + name[name.length - 1]
-    : "*".repeat(name.length)
-  const maskedDomain = domain.map((d, i) => 
-    i === domain.length - 1 ? d : "*".repeat(d.length)
-  ).join(".")
-  return `${maskedName}@${maskedDomain}`
-}
-
-const maskPhone = (phone: string): string => {
-  const digits = phone.replace(/\D/g, "")
-  if (digits.length < 4) return "***-****"
-  return `***-***-${digits.slice(-4)}`
-}
-
-const maskCreditCard = (cc: string): string => {
-  const digits = cc.replace(/\D/g, "")
-  if (digits.length < 4) return "****-****-****-****"
-  return `****-****-****-${digits.slice(-4)}`
-}
-
-const maskAddress = (address: string): string => {
-  const parts = address.split(",")
-  if (parts.length === 0) return "*** Masked Address ***"
-  return parts.map((p, i) => i === 0 ? "*** " + p.split(" ").pop() : p).join(",")
-}
-
-const maskHash = (text: string): string => {
-  // Simulate hash with deterministic-looking string
-  const hash = Array.from(text).reduce((acc, c) => acc + c.charCodeAt(0), 0)
-  return `sha256:${hash.toString(16).padStart(8, "0")}...`
-}
-
-const maskJson = (json: string): string => {
-  try {
-    const obj = JSON.parse(json)
-    const masked = Object.fromEntries(
-      Object.entries(obj).map(([k, v]) => [k, typeof v === "string" ? "***" : v])
-    )
-    return JSON.stringify(masked)
-  } catch {
-    return '{"***": "***"}'
-  }
-}
-
-const applyMask = (value: string, strategy: string): string => {
-  switch (strategy) {
-    case "email": return maskEmail(value)
-    case "phone": return maskPhone(value)
-    case "credit_card": return maskCreditCard(value)
-    case "address": return maskAddress(value)
-    case "hash": return maskHash(value)
-    case "json": return maskJson(value)
-    default: return "***"
-  }
+  onSaveRule?: (rule: { table: string; column: string; strategy: string }) => Promise<void>
 }
 
 export function RuleTestDialog({ open, onOpenChange, onSaveRule }: RuleTestDialogProps) {
@@ -102,20 +31,31 @@ export function RuleTestDialog({ open, onOpenChange, onSaveRule }: RuleTestDialo
   const [testValue, setTestValue] = useState("")
   const [maskedValue, setMaskedValue] = useState("")
   const [hasTestedRule, setHasTestedRule] = useState(false)
+  const [isSaving, setIsSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
 
   const selectedStrategy = STRATEGIES.find(s => s.value === strategy)
 
   const handleTest = () => {
-    const masked = applyMask(testValue || selectedStrategy?.example || "", strategy)
-    setMaskedValue(masked)
+    setMaskedValue(previewMask(strategy))
     setHasTestedRule(true)
   }
 
-  const handleSave = () => {
-    if (onSaveRule && table && column) {
-      onSaveRule({ table, column, strategy })
+  const handleSave = async () => {
+    if (!onSaveRule || !table || !column || isSaving) {
+      return
+    }
+
+    setIsSaving(true)
+    setSaveError(null)
+    try {
+      await onSaveRule({ table, column, strategy })
       onOpenChange(false)
       resetForm()
+    } catch (error) {
+      setSaveError(errorMessage(error, "Failed to save rule."))
+    } finally {
+      setIsSaving(false)
     }
   }
 
@@ -126,6 +66,8 @@ export function RuleTestDialog({ open, onOpenChange, onSaveRule }: RuleTestDialo
     setTestValue("")
     setMaskedValue("")
     setHasTestedRule(false)
+    setSaveError(null)
+    setIsSaving(false)
   }
 
   const loadExample = () => {
@@ -136,6 +78,7 @@ export function RuleTestDialog({ open, onOpenChange, onSaveRule }: RuleTestDialo
 
   return (
     <Dialog open={open} onOpenChange={(isOpen) => {
+      if (isSaving) return
       if (!isOpen) resetForm()
       onOpenChange(isOpen)
     }}>
@@ -146,7 +89,7 @@ export function RuleTestDialog({ open, onOpenChange, onSaveRule }: RuleTestDialo
             Test & Create Masking Rule
           </DialogTitle>
           <DialogDescription>
-            Test how your data will be masked before applying the rule to your database.
+            Preview the shape of each masking strategy before applying the rule to your database.
           </DialogDescription>
         </DialogHeader>
 
@@ -197,7 +140,7 @@ export function RuleTestDialog({ open, onOpenChange, onSaveRule }: RuleTestDialo
             <div className="flex items-center justify-between">
               <h4 className="text-sm font-medium text-gray-300 flex items-center gap-2">
                 <Sparkles className="h-4 w-4 text-amber-400" />
-                Live Preview
+                Preview
               </h4>
               <Button variant="ghost" size="sm" onClick={loadExample}>
                 <RefreshCw className="h-3 w-3 mr-1" />
@@ -223,7 +166,7 @@ export function RuleTestDialog({ open, onOpenChange, onSaveRule }: RuleTestDialo
             <div className="flex items-center justify-center">
               <Button onClick={handleTest} variant="secondary" className="w-full">
                 <FlaskConical className="h-4 w-4 mr-2" />
-                Test Masking
+                Preview Masking
               </Button>
             </div>
 
@@ -244,35 +187,47 @@ export function RuleTestDialog({ open, onOpenChange, onSaveRule }: RuleTestDialo
                     </div>
                     <ArrowRight className="h-5 w-5 text-gray-600 flex-shrink-0" />
                     <div className="flex-1">
-                      <span className="text-gray-500 text-xs block mb-1">Masked</span>
+                      <span className="text-gray-500 text-xs block mb-1">Masked (example)</span>
                       <code className="bg-emerald-500/10 text-emerald-400 px-3 py-2 rounded-lg block font-mono text-sm">
                         {maskedValue}
                       </code>
                     </div>
                   </div>
-                  
-                  <div className="flex items-center justify-center">
-                    <Badge variant="success" className="text-xs">
-                      ✓ Masking preview successful
-                    </Badge>
-                  </div>
+
+                  <p className="flex items-center justify-center gap-1.5 text-xs text-amber-400/90">
+                    <Info className="h-3.5 w-3.5 flex-shrink-0" />
+                    {PREVIEW_DISCLAIMER}
+                  </p>
                 </motion.div>
               )}
             </AnimatePresence>
           </div>
+
+          {saveError && (
+            <div
+              className="rounded-lg border border-red-700/40 bg-red-900/20 px-4 py-3 text-sm text-red-300"
+              role="alert"
+            >
+              {saveError}
+            </div>
+          )}
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={isSaving}>
             Cancel
           </Button>
           <Button
             variant="success"
             onClick={handleSave}
-            disabled={!table || !column || !hasTestedRule}
+            disabled={!table || !column || !hasTestedRule || isSaving}
           >
-            <Save className="h-4 w-4 mr-2" />
-            Save Rule
+            {isSaving ? (
+              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+            ) : (
+              <Save className="h-4 w-4 mr-2" />
+            )}
+            {isSaving ? "Saving..." : "Save Rule"}
           </Button>
         </DialogFooter>
       </DialogContent>

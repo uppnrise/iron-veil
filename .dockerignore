@@ -1,5 +1,6 @@
 # Build artifacts
 target/
+dist/
 *.rs.bk
 
 # Git
@@ -18,21 +19,28 @@ target/
 !README.md
 docs/
 
-# Web frontend (separate build)
-web/node_modules/
-web/.next/
-web/out/
+# Web frontend (built and deployed separately)
+web/
+
+# Tests (not needed for the release build)
+tests/
 
 # Scripts and development files
 scripts/
 assets/
+monitoring/
 
-# Certificate sources (use mounted certs in production)
-# Keep certs/ for development convenience
+# Certificates and key material must never enter the build context
+certs/
+*.key
+*.pem
+*.p12
+*.pfx
 
 # Docker files
 Dockerfile
 docker-compose.yml
+docker-compose.tls.yml
 .dockerignore
 
 # CI/CD
@@ -42,3 +50,5 @@ docker-compose.yml
 .DS_Store
 *.log
 *.tmp
+.env
+.env.*

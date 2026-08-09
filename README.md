@@ -13,13 +13,13 @@
 *   **Multi-Database Support**: Works with both **PostgreSQL** and **MySQL** wire protocols.
 *   **Zero-Copy Parsing**: Built with `tokio` and `bytes` for high throughput and low latency.
 *   **Configurable Rules**: Define masking strategies per column via `proxy.yaml` with table-scoped matching for MySQL and PostgreSQL.
-*   **TLS Support**: Client-to-proxy and proxy-to-upstream TLS encryption.
+*   **TLS Support**: Client-to-proxy and proxy-to-upstream TLS on both protocols. `upstream_tls: true` is a requirement, not a preference — the proxy refuses the connection rather than falling back to cleartext.
 
 ### PII Detection
-*   **Extended PII Types**: Detects emails, credit cards, SSN, phone numbers, IP addresses, dates of birth, and passport numbers.
-*   **Heuristic Detection**: Automatically detects and masks PII using regex patterns.
-*   **JSON/Array Support**: Recursively masks PII in JSON objects and PostgreSQL/MySQL array types.
-*   **Deterministic Masking**: Same input always produces the same fake output (useful for testing).
+*   **Extended PII Types**: Detects emails, credit cards (Luhn-validated), SSNs, phone numbers, IP addresses, dates of birth and passport numbers; the ambiguous detectors are opt-in.
+*   **Heuristic Detection**: Rule-less detection for columns you have not configured, including email and phone embedded in free text.
+*   **JSON/Array Support**: Recursively masks PII in JSON objects and PostgreSQL/MySQL array types, on both protocols.
+*   **Keyed Deterministic Masking**: Same input produces the same fake output under a given `masking_secret`, without that mapping being reproducible by anyone who lacks the secret.
 
 ### Production Ready
 *   **Graceful Shutdown**: Signal handling (SIGTERM, SIGINT) with connection draining.
@@ -78,6 +78,25 @@
     ```
     Then open [http://localhost:3000](http://localhost:3000).
 
+Notes:
+
+*   The demo Postgres publishes on `127.0.0.1:5432` only, and its password
+    defaults to `password`. Override it with the `POSTGRES_PASSWORD`
+    environment variable: `POSTGRES_PASSWORD=changeme docker compose up -d`.
+
+### Optional: TLS for the Demo Postgres
+
+TLS on the demo Postgres is opt-in via a compose override. Generate the
+certificates first — `./scripts/generate_certs.sh` creates `./certs/` and also
+sets `certs/server.key` to `999:999` (the postgres container user) so the
+container can read it. If the chown step fails (it may need root), run
+`sudo chown 999:999 certs/server.key` manually.
+
+```bash
+./scripts/generate_certs.sh
+docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d --build
+```
+
 ### Running Locally
 
 ```bash
@@ -101,7 +120,10 @@ Options:
       --upstream-host <UPSTREAM_HOST>  Upstream database host [default: 127.0.0.1]
       --upstream-port <UPSTREAM_PORT>  Upstream database port [default: 5432]
       --config <CONFIG>                Path to configuration file [default: proxy.yaml]
+      --bind <BIND>                    Address the proxy listener binds to [default: 0.0.0.0]
       --api-port <API_PORT>            Management API port [default: 3001]
+      --api-bind <API_BIND>            Address the management API binds to
+                                       [default: 127.0.0.1; overrides api.bind]
       --protocol <PROTOCOL>            Database protocol to proxy [default: postgres]
                                        [possible values: postgres, mysql]
       --shutdown-timeout <SECONDS>     Graceful shutdown timeout [default: 30]
@@ -114,6 +136,26 @@ Options:
 Edit `proxy.yaml` to configure masking rules:
 
 ```yaml
+# Global masking kill-switch. When false, NO masking is applied to any
+# connection regardless of the rules below.
+masking_enabled: true
+
+# Keys the deterministic masking output (fake-data seeds and the `hash`
+# strategy). Set this — or the IRONVEIL_MASKING_SECRET env var, which takes
+# precedence — so masked values stay stable across restarts while remaining
+# uncomputable by anyone without the secret. When unset, a random per-process
+# key is generated and a warning is logged.
+masking_secret: "change-me"
+
+# Heuristic (rule-less) PII detection for columns with no explicit rule.
+# Only the detectors listed here run. credit_card, ip, dob and passport are
+# deliberately NOT in the default set: on a real schema they rewrite
+# legitimate values (order numbers, host addresses, every date column) with
+# no rule, no opt-out and no error.
+heuristics:
+  enabled: true
+  types: [email, phone, ssn]   # any of: email, phone, ssn, credit_card, ip, dob, passport
+
 # TLS Configuration
 tls:
   enabled: false
@@ -128,10 +170,26 @@ telemetry:
   otlp_endpoint: "http://localhost:4317"
   service_name: "iron-veil"
 
-# Management API Security
+# Management API Security. The API binds 127.0.0.1 by default; binding any
+# other address requires api_key or jwt_secret, and the proxy refuses to start
+# otherwise (the API can globally disable masking).
 api:
   api_key: "your-secret-key"  # Optional: protects endpoints via X-API-Key header
   jwt_secret: "your-jwt-secret"  # Optional: allows Authorization: Bearer <token>
+  bind: "127.0.0.1"  # Optional: management API bind address
+  cors_origins: ["http://localhost:3000"]  # Optional: browser origins allowed to call the API
+
+# Audit logging. With enabled: true but no sink configured, entries live only
+# in a 1000-entry memory ring and are lost on restart — the proxy warns at
+# startup when that is the case.
+audit:
+  enabled: true
+  log_to_stdout: true   # container-native; recommended
+  log_file: null        # or a path, with a mounted volume
+  rotation_enabled: true
+  max_file_size_bytes: 10485760
+  max_rotated_files: 5
+  events: []            # empty = log every event type
 
 # Connection Limits
 limits:
@@ -170,28 +228,103 @@ rules:
 |----------|-------------|----------------|
 | `email` | Generates fake email | `john.doe@example.com` |
 | `phone` | Generates fake phone number | `555-123-4567` |
-| `address` | Generates fake city name | `Springfield` |
+| `address` | Generates fake street address | `4821 Maple Ridge` |
+| `name` | Generates fake person name | `Dana Whitfield` |
+| `text` | Generates fake free text | `Lorem ipsum dolor sit.` |
 | `credit_card` | Generates fake CC number | `4532-xxxx-xxxx-1234` |
-| `hash` | Deterministic SHA-256 hash | `sha256:2cf24dba5fb0a30e...` |
+| `ssn` | Redacted SSN | `XXX-XX-4821` |
+| `ip` | Fake documentation-range IPv4 | `203.0.113.42` |
+| `dob` | Fake date, deterministic per value | `1974-03-19` |
+| `passport` | Redacted passport number | `X04821337` |
+| `hash` | Keyed SHA-256 hash | `sha256:2cf24dba5fb0a30e...` |
 | `json` | Recursively masks PII in JSON | `{"email": "fake@example.com"}` |
+
+An unknown strategy is rejected at config load and by `POST /rules` rather
+than silently degrading to the literal string `MASKED`.
+
+Masking is deterministic but **keyed**: the same input maps to the same output
+under a given `masking_secret`, and the mapping cannot be reproduced or
+brute-forced without it.
 
 ### Rule Matching Notes
 
-- MySQL: `table` + `column` rules are enforced as configured.
-- PostgreSQL: IronVeil resolves `table_oid` values to table names at session bootstrap and then enforces `table` + `column` rules.
-- If PostgreSQL OID lookup fails (for example due to permissions), IronVeil safely falls back to global `column` rules for that session.
+- Identifier matching is case-insensitive on both protocols.
+- Rules match a column's **provenance**, not just its result-set label, so
+  `SELECT email AS x FROM users` is still masked: MySQL uses `org_name` /
+  `org_table` from the column definition, and PostgreSQL resolves
+  `table_oid` + `column_index` through a catalog map loaded at session
+  bootstrap (skipped entirely when no rules are configured).
+- If the PostgreSQL catalog bootstrap fails (for example due to permissions),
+  it is retried on the next `ReadyForQuery`; until it succeeds, table-scoped
+  rules for unresolved tables do not apply and global `column` rules still do.
+- Expressions (`CONCAT`, `SUBSTRING`, `GROUP_CONCAT`, …) have no provenance on
+  the wire and are matched by label only. Masking is best-effort by design;
+  see the threat model note below.
+
+### Scanner Support
+
+The offline PII scanner (`POST /scan`, `POST /schema`, and the dashboard's
+Scan page) is **PostgreSQL-only**. Against a MySQL upstream both endpoints
+return `501 Not Implemented` with `"code": "unsupported_protocol"`. Runtime
+masking works on both protocols; only the offline schema inspection does not.
+
+### Protocol Support
+
+IronVeil masks the **text protocol** only. MySQL server-side prepared
+statements (the binary protocol: `COM_STMT_PREPARE` / `COM_STMT_EXECUTE` /
+`COM_STMT_FETCH`) are rejected with `ER_UNSUPPORTED_PS` (1295) plus a warning
+and an `ironveil_binary_protocol_rejected_total` metric, because binary result
+rows would bypass masking entirely. Most connectors fall back to client-side
+statements on 1295; JDBC users should set `useServerPrepStmts=false`, and Go's
+`database/sql` MySQL driver `interpolateParams=true`.
+
+PostgreSQL `COPY ... TO STDOUT` is likewise **not** masked — COPY data does not
+pass through the row interceptor. It is forwarded with a warning and an
+`ironveil_copy_passthrough_total` metric so the unmasked path is visible rather
+than silent.
 
 ### PII Types Auto-Detected
 
-| Type | Pattern | Example |
-|------|---------|---------|
-| Email | Standard email format | `user@domain.com` |
-| Credit Card | 13-19 digit numbers | `4111111111111111` |
-| SSN | XXX-XX-XXXX format | `123-45-6789` |
-| Phone | International format with country code | `+1-555-123-4567` |
-| IP Address | IPv4 format | `192.168.1.1` |
-| Date of Birth | Various date formats | `1990-01-15`, `01/15/1990` |
-| Passport | Alphanumeric (6-9 chars) | `AB1234567` |
+| Type | Default? | Pattern | Example |
+|------|----------|---------|---------|
+| Email | yes | Standard email format, also matched inside free text | `user@domain.com` |
+| Phone | yes | Formatted number (separators/parens/`+`), also inside free text | `+1-555-123-4567` |
+| SSN | yes | XXX-XX-XXXX format | `123-45-6789` |
+| Credit Card | opt-in | 13-19 digits, Luhn-validated | `4532015112830366` |
+| IP Address | opt-in | IPv4 format | `192.168.1.1` |
+| Date of Birth | opt-in | Various date formats | `1990-01-15`, `01/15/1990` |
+| Passport | opt-in | Alphanumeric (6-9 chars) | `AB1234567` |
+
+Opt-in detectors are off unless listed in `heuristics.types`. They match by
+shape alone, so on a real schema they will also rewrite order numbers,
+configuration addresses and ordinary date columns. Enable them only where the
+schema warrants it, or use an explicit per-column rule instead.
+
+A bare digit run is never treated as a phone number, and a 16-digit value that
+fails the Luhn check is never treated as a card.
+
+## Security Posture
+
+IronVeil is a **compliance and convenience control**, not an adversarial
+boundary. It exists to keep PII out of the hands of tools and people who have
+legitimate database access but no need to see raw personal data — an AI support
+agent, a dashboard, an analyst. Read-only access is a database `GRANT`
+concern; the proxy does not parse SQL or filter statements.
+
+What follows from that:
+
+- **Masking is best effort.** A determined user with query access can defeat
+  it (expressions have no provenance on the wire). Occasional
+  over-disclosure is an accepted trade; silently *wrong* data is not, which is
+  why the ambiguous heuristics are opt-in.
+- **Nothing pre-masking is retained.** The log ring records the column,
+  strategy, original length and masked preview — never the source value — and
+  SQL string literals are redacted from logged query text.
+- **The control plane fails closed.** The management API can globally disable
+  masking, so it binds loopback unless credentials are configured, compares
+  keys in constant time, and uses an explicit CORS allow-list.
+- **Unmasked paths are loud.** The MySQL binary protocol is rejected outright;
+  PostgreSQL COPY-out is counted and warned about rather than passing silently.
 
 ## Management API
 
@@ -226,7 +359,7 @@ The management API runs on port 3001 by default.
 ```json
 {
   "status": "ok",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "upstream": {
     "host": "localhost",
     "port": 5432,
@@ -390,11 +523,14 @@ cd web && npm install && npm run build
 
 ### Web API Configuration
 
-The dashboard reads API settings from optional `NEXT_PUBLIC_*` variables:
+The dashboard reads its API base URL from `NEXT_PUBLIC_API_BASE_URL`
+(default: `http://localhost:3001`).
 
-- `NEXT_PUBLIC_API_BASE_URL` (default: `http://localhost:3001`)
-- `NEXT_PUBLIC_IRONVEIL_API_KEY` (sent as `X-API-Key`)
-- `NEXT_PUBLIC_IRONVEIL_BEARER_TOKEN` (sent as `Authorization: Bearer ...`)
+Management credentials are **not** configured via environment variables: Next
+inlines every `NEXT_PUBLIC_*` value into the public JS bundle, which would ship
+the management key to every browser that can fetch a chunk. Enter the API key
+or bearer token on the dashboard's Settings page instead; it is held in
+`sessionStorage` for that tab only, and exactly one auth header is ever sent.
 
 ## Testing with Docker
 
@@ -418,6 +554,24 @@ Run integration tests in strict mode (fail if required services are not running)
 
 ```bash
 IRONVEIL_REQUIRE_SERVICES=1 cargo test --test integration_test
+```
+
+### End-to-End Test Suite
+
+The full end-to-end suite spins up throwaway database containers, builds the
+proxy, and verifies masking through real `psql`/`mysql` clients (it uses its
+own generated proxy config, not the shipped `proxy.yaml`). It requires only
+`docker`, `cargo` and `curl`, plus free ports 5433/3307/6543/3001 — port
+probing uses bash's built-in `/dev/tcp`, and the `psql`/`mysql` clients run
+inside the test containers rather than on the host:
+
+```bash
+# PostgreSQL suite (also run in CI)
+./scripts/test_e2e.sh postgres
+
+# MySQL suite, or both
+./scripts/test_e2e.sh mysql
+./scripts/test_e2e.sh all
 ```
 
 ## Testing OpenTelemetry

@@ -1,8 +1,10 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useState } from "react"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { ScanSearch, ShieldCheck, AlertTriangle, Loader2, CheckCircle } from "lucide-react"
-import { ApiError, apiFetchJson } from "@/lib/api"
+import { apiFetchJson } from "@/lib/api"
+import { errorMessage, retryPolicy } from "@/lib/query"
 
 interface Finding {
   table: string
@@ -38,15 +40,26 @@ function normalizeRuleKey(table: string | null | undefined, column: string): str
   return `${normalizedTable}.${normalizedColumn}`
 }
 
+// Map scanner finding types to the masking strategies the proxy implements.
+const FINDING_TYPE_TO_STRATEGY: Record<string, string> = {
+  Email: "email",
+  Phone: "phone",
+  CreditCard: "credit_card",
+  Ssn: "ssn",
+  IpAddress: "ip",
+  DateOfBirth: "dob",
+  Passport: "passport",
+}
+
 export default function ScanPage() {
-  const [isScanning, setIsScanning] = useState(false)
+  const queryClient = useQueryClient()
   const [findings, setFindings] = useState<Finding[]>([])
   const [scanComplete, setScanComplete] = useState(false)
   const [scanError, setScanError] = useState<string | null>(null)
-  const [appliedRules, setAppliedRules] = useState<Set<string>>(new Set())
+  const [applyError, setApplyError] = useState<string | null>(null)
   const [scanForm, setScanForm] = useState<ScanFormState>({
-    username: "postgres",
-    password: "password",
+    username: "",
+    password: "",
     database: "postgres",
     schema: "public",
     sampleSize: 100,
@@ -54,31 +67,19 @@ export default function ScanPage() {
     excludeTables: "",
   })
 
-  const fetchAppliedRules = async () => {
-    try {
-      const data = await apiFetchJson<RulesResponse>("/rules")
-      const keys = new Set(
-        (data.rules || []).map((rule) => normalizeRuleKey(rule.table, rule.column))
-      )
-      setAppliedRules(keys)
-    } catch (error) {
-      console.error("Failed to fetch rules:", error)
-    }
-  }
+  const { data: rulesData, refetch: refetchRules } = useQuery<RulesResponse>({
+    queryKey: ["rules"],
+    queryFn: () => apiFetchJson<RulesResponse>("/rules"),
+    retry: retryPolicy,
+  })
 
-  useEffect(() => {
-    void fetchAppliedRules()
-  }, [])
+  const appliedRules = new Set(
+    (rulesData?.rules ?? []).map((rule) => normalizeRuleKey(rule.table, rule.column))
+  )
 
-  const startScan = async () => {
-    setIsScanning(true)
-    setScanComplete(false)
-    setFindings([])
-    setScanError(null)
-    
-    try {
-      await fetchAppliedRules()
-      const data = await apiFetchJson<{ findings?: Finding[] }>("/scan", {
+  const scanMutation = useMutation({
+    mutationFn: () =>
+      apiFetchJson<{ findings?: Finding[] }>("/scan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -92,8 +93,35 @@ export default function ScanPage() {
             .split(",")
             .map((t) => t.trim())
             .filter(Boolean),
-        })
-      })
+        }),
+      }),
+  })
+
+  const applyRuleMutation = useMutation({
+    mutationFn: (rule: { table: string; column: string; strategy: string }) =>
+      apiFetchJson<Record<string, unknown>>("/rules", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(rule),
+      }),
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["rules"] })
+      queryClient.invalidateQueries({ queryKey: ["config"] })
+    },
+  })
+
+  const isScanning = scanMutation.isPending
+  const canScan = scanForm.username.trim().length > 0 && scanForm.password.length > 0
+
+  const startScan = async () => {
+    setScanComplete(false)
+    setFindings([])
+    setScanError(null)
+    setApplyError(null)
+
+    try {
+      await refetchRules()
+      const data = await scanMutation.mutateAsync()
       const normalizedFindings: Finding[] = (data.findings || []).map((finding: Finding) => ({
         ...finding,
         type: finding.type || finding.pii_type || "Unknown"
@@ -101,36 +129,31 @@ export default function ScanPage() {
       setFindings(normalizedFindings)
       setScanComplete(true)
     } catch (error) {
-      const message = error instanceof ApiError
-        ? error.message
-        : "Scan failed. Please try again."
-      setScanError(message)
-      console.error("Scan failed:", error)
-    } finally {
-      setIsScanning(false)
+      setScanError(errorMessage(error, "Scan failed. Please try again."))
     }
   }
 
   const applyRule = async (finding: Finding) => {
-    const ruleId = normalizeRuleKey(finding.table, finding.column)
     const detectedType = finding.type || finding.pii_type || ""
-    
+    const strategy = FINDING_TYPE_TO_STRATEGY[detectedType]
+
+    setApplyError(null)
+    if (!strategy) {
+      setApplyError(
+        `No masking strategy is available for finding type "${detectedType || "Unknown"}". ` +
+        "Create a rule manually from the Masking Rules page instead."
+      )
+      return
+    }
+
     try {
-      await apiFetchJson<Record<string, unknown>>("/rules", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          table: finding.table,
-          column: finding.column,
-          strategy: detectedType === "Email" ? "email" : 
-                   detectedType === "Phone" ? "phone" : 
-                   detectedType === "CreditCard" ? "credit_card" : "hash"
-        })
+      await applyRuleMutation.mutateAsync({
+        table: finding.table,
+        column: finding.column,
+        strategy,
       })
-      
-      setAppliedRules(prev => new Set(prev).add(ruleId))
     } catch (error) {
-      console.error("Failed to apply rule:", error)
+      setApplyError(errorMessage(error, "Failed to apply masking rule."))
     }
   }
 
@@ -145,10 +168,10 @@ export default function ScanPage() {
         </div>
         <button
           onClick={startScan}
-          disabled={isScanning}
+          disabled={isScanning || !canScan}
           className={`flex items-center px-6 py-3 rounded-lg font-medium transition-colors ${
-            isScanning 
-              ? "bg-gray-800 text-gray-400 cursor-not-allowed" 
+            isScanning || !canScan
+              ? "bg-gray-800 text-gray-400 cursor-not-allowed"
               : "bg-emerald-600 hover:bg-emerald-700 text-white"
           }`}
         >
@@ -166,9 +189,21 @@ export default function ScanPage() {
         </button>
       </div>
 
+      {!canScan && (
+        <p className="text-sm text-gray-500">
+          Enter the database username and password below to enable scanning.
+        </p>
+      )}
+
       {scanError && (
         <div className="rounded-lg border border-red-700/40 bg-red-900/20 px-4 py-3 text-red-300" role="alert">
           {scanError}
+        </div>
+      )}
+
+      {applyError && (
+        <div className="rounded-lg border border-red-700/40 bg-red-900/20 px-4 py-3 text-red-300" role="alert">
+          {applyError}
         </div>
       )}
 
@@ -179,6 +214,7 @@ export default function ScanPage() {
           </label>
           <input
             id="scan-username"
+            autoComplete="off"
             value={scanForm.username}
             onChange={(e) => setScanForm((prev) => ({ ...prev, username: e.target.value }))}
             className="w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white"
@@ -191,6 +227,7 @@ export default function ScanPage() {
           <input
             id="scan-password"
             type="password"
+            autoComplete="off"
             value={scanForm.password}
             onChange={(e) => setScanForm((prev) => ({ ...prev, password: e.target.value }))}
             className="w-full rounded-md border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-white"
@@ -277,7 +314,7 @@ export default function ScanPage() {
               const detectedType = finding.type || finding.pii_type || "Unknown"
 
               return (
-                <div 
+                <div
                   key={idx}
                   className="bg-gray-900 border border-gray-800 rounded-xl p-6 flex items-center justify-between hover:border-gray-700 transition-colors"
                 >
@@ -305,11 +342,11 @@ export default function ScanPage() {
 
                   <button
                     onClick={() => applyRule(finding)}
-                    disabled={isApplied}
+                    disabled={isApplied || applyRuleMutation.isPending}
                     className={`flex items-center px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
                       isApplied
                         ? "bg-emerald-500/10 text-emerald-500 border border-emerald-500/20 cursor-default"
-                        : "bg-white text-black hover:bg-gray-200"
+                        : "bg-white text-black hover:bg-gray-200 disabled:opacity-60"
                     }`}
                   >
                     {isApplied ? (
@@ -342,7 +379,9 @@ export default function ScanPage() {
           <div className="text-center py-20 bg-gray-900/50 rounded-xl border border-gray-800 border-dashed">
             <ScanSearch className="w-12 h-12 text-gray-600 mx-auto mb-4" />
             <h3 className="text-xl font-semibold text-gray-400">Ready to Scan</h3>
-            <p className="text-gray-500 mt-2">Click the button above to analyze your database for sensitive data.</p>
+            <p className="text-gray-500 mt-2">
+              Enter database credentials, then start a scan to analyze your database for sensitive data.
+            </p>
           </div>
         )}
       </div>

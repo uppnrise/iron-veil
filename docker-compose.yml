@@ -2,34 +2,60 @@ services:
   # The Database Proxy
   proxy:
     build: .
+    restart: unless-stopped
     ports:
       - "6543:6543"
       - "3001:3001"
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     environment:
       - RUST_LOG=info
     volumes:
-      - ./proxy.yaml:/usr/local/bin/proxy.yaml
-    command: ["./iron-veil", "--upstream-host", "postgres", "--upstream-port", "5432", "--config", "proxy.yaml", "--api-port", "3001"]
+      # Compose-specific config binds the API on 0.0.0.0 with a demo key so
+      # published port 3001 is reachable from the host (CI health gate + cargo
+      # integration tests). Local binary runs still use proxy.yaml (loopback).
+      - ./proxy.compose.yaml:/usr/local/bin/proxy.yaml:ro
+    command:
+      [
+        "./iron-veil",
+        "--upstream-host",
+        "postgres",
+        "--upstream-port",
+        "5432",
+        "--config",
+        "proxy.yaml",
+        "--api-port",
+        "3001",
+        "--api-bind",
+        "0.0.0.0",
+      ]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   # The Upstream Database (Production Simulation)
+  # TLS is opt-in: see docker-compose.tls.yml and scripts/generate_certs.sh
   postgres:
     image: postgres:17
+    restart: unless-stopped
     environment:
-      POSTGRES_PASSWORD: password
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
       POSTGRES_DB: postgres
     ports:
-      - "5432:5432"
+      # Demo database with a default password: keep it off the network
+      - "127.0.0.1:5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
-      - ./certs:/etc/postgresql/certs:ro
-    command: >
-      postgres 
-      -c ssl=on 
-      -c ssl_cert_file=/etc/postgresql/certs/server.crt 
-      -c ssl_key_file=/etc/postgresql/certs/server.key
-
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
 volumes:
   pg_data:

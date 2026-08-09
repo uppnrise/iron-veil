@@ -5,7 +5,7 @@
 # Builds, tests, and packages releases
 #######################################
 
-set -e  # Exit on error
+set -euo pipefail
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -21,7 +21,6 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 WEB_DIR="$PROJECT_ROOT/web"
 
 # Release configuration
-RELEASE_DIR="$PROJECT_ROOT/release"
 DIST_DIR="$PROJECT_ROOT/dist"
 
 #######################################
@@ -215,6 +214,46 @@ fi
 log_success "Pre-flight checks passed"
 
 #######################################
+# Version Manifest Sync
+#######################################
+
+CURRENT_VERSION=$(get_version_from_cargo)
+if [ "$VERSION" != "$CURRENT_VERSION" ]; then
+    if [ "$DRY_RUN" = true ]; then
+        log_info "Dry run: would update manifests from v${CURRENT_VERSION} to v${VERSION} and commit"
+    else
+        log_header "Updating Version Manifests"
+
+        log_step "Writing version $VERSION to Cargo.toml..."
+        sed -i.bak "s/^version = \".*\"/version = \"$VERSION\"/" "$PROJECT_ROOT/Cargo.toml"
+        rm -f "$PROJECT_ROOT/Cargo.toml.bak"
+
+        log_step "Updating Cargo.lock..."
+        if ! (cd "$PROJECT_ROOT" && cargo update --package iron-veil); then
+            log_info "cargo update failed (offline?); patching Cargo.lock directly"
+            sed -i.bak "/^name = \"iron-veil\"\$/{n;s/^version = \".*\"/version = \"$VERSION\"/;}" "$PROJECT_ROOT/Cargo.lock"
+            rm -f "$PROJECT_ROOT/Cargo.lock.bak"
+        fi
+
+        if [ "$SKIP_WEB" = false ] && [ -d "$WEB_DIR" ]; then
+            log_step "Writing version $VERSION to web/package.json..."
+            (cd "$WEB_DIR" && npm version --no-git-tag-version --allow-same-version "$VERSION" > /dev/null)
+        fi
+
+        log_step "Committing version bump..."
+        git -C "$PROJECT_ROOT" add Cargo.toml Cargo.lock
+        if [ -f "$WEB_DIR/package.json" ]; then
+            git -C "$PROJECT_ROOT" add web/package.json
+        fi
+        if [ -f "$WEB_DIR/package-lock.json" ]; then
+            git -C "$PROJECT_ROOT" add web/package-lock.json
+        fi
+        git -C "$PROJECT_ROOT" commit -m "chore(release): v${VERSION}"
+        log_success "Manifests updated and committed for v${VERSION}"
+    fi
+fi
+
+#######################################
 # Code Quality Checks
 #######################################
 
@@ -254,24 +293,19 @@ fi
 
 if [ "$SKIP_TESTS" = false ]; then
     log_header "Running Tests"
-    
+
     log_step "Running Rust tests..."
-    if ! cargo test 2>&1 | tee /tmp/test-output.txt | tail -20; then
-        if grep -q "FAILED" /tmp/test-output.txt; then
-            log_error "Tests failed."
-            exit 1
-        fi
-    fi
-    
-    # Check if tests actually passed
-    if grep -q "test result: ok" /tmp/test-output.txt; then
-        log_success "All tests passed"
-    elif grep -q "FAILED" /tmp/test-output.txt; then
-        log_error "Tests failed."
+    TEST_LOG="$(mktemp)"
+    set +e
+    cargo test --locked 2>&1 | tee "$TEST_LOG" | tail -20
+    TEST_STATUS=${PIPESTATUS[0]}
+    set -e
+    rm -f "$TEST_LOG"
+    if [ "$TEST_STATUS" -ne 0 ]; then
+        log_error "Tests failed (cargo test exited with status $TEST_STATUS)."
         exit 1
-    else
-        log_success "Tests completed"
     fi
+    log_success "All tests passed"
 else
     log_info "Skipping tests (--skip-tests)"
 fi

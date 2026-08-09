@@ -4,6 +4,7 @@ describe("api client", () => {
   beforeEach(() => {
     jest.resetModules()
     process.env = { ...originalEnv }
+    sessionStorage.clear()
     localStorage.clear()
   })
 
@@ -18,9 +19,9 @@ describe("api client", () => {
     expect(buildApiUrl("/health")).toBe("https://api.example.com/health")
   })
 
-  it("adds optional API auth headers from localStorage", async () => {
-    localStorage.setItem("ironveil.api_key", "secret-key")
-    localStorage.setItem("ironveil.jwt", "jwt-token")
+  it("sends only X-API-Key when the stored auth mode is api_key", async () => {
+    sessionStorage.setItem("ironveil.auth_mode", "api_key")
+    sessionStorage.setItem("ironveil.auth_credential", "secret-key")
 
     const fetchMock = jest.fn().mockResolvedValue({
       ok: true,
@@ -35,17 +36,62 @@ describe("api client", () => {
       body: JSON.stringify({ column: "email", strategy: "email" }),
     })
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      "http://localhost:3001/rules",
-      expect.objectContaining({
-        method: "POST",
-        headers: expect.objectContaining({
-          "Content-Type": "application/json",
-          "X-API-Key": "secret-key",
-          Authorization: "Bearer jwt-token",
-        }),
-      }),
-    )
+    const [, init] = fetchMock.mock.calls[0]
+    expect(fetchMock.mock.calls[0][0]).toBe("http://localhost:3001/rules")
+    expect(init.headers).toMatchObject({
+      "Content-Type": "application/json",
+      "X-API-Key": "secret-key",
+    })
+    expect(init.headers.Authorization).toBeUndefined()
+  })
+
+  it("sends only Authorization when the stored auth mode is bearer", async () => {
+    sessionStorage.setItem("ironveil.auth_mode", "bearer")
+    sessionStorage.setItem("ironveil.auth_credential", "jwt-token")
+
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: "ok" }),
+    })
+    global.fetch = fetchMock as unknown as typeof fetch
+
+    const { apiFetch } = await import("@/lib/api")
+    await apiFetch("/rules")
+
+    const [, init] = fetchMock.mock.calls[0]
+    expect(init.headers).toMatchObject({ Authorization: "Bearer jwt-token" })
+    expect(init.headers["X-API-Key"]).toBeUndefined()
+  })
+
+  it("never reads credentials from NEXT_PUBLIC environment variables", async () => {
+    process.env.NEXT_PUBLIC_IRONVEIL_API_KEY = "env-key"
+    process.env.NEXT_PUBLIC_IRONVEIL_BEARER_TOKEN = "env-token"
+
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: "ok" }),
+    })
+    global.fetch = fetchMock as unknown as typeof fetch
+
+    const { apiFetch } = await import("@/lib/api")
+    await apiFetch("/rules")
+
+    const [, init] = fetchMock.mock.calls[0]
+    const headers = (init?.headers ?? {}) as Record<string, string>
+    expect(headers["X-API-Key"]).toBeUndefined()
+    expect(headers.Authorization).toBeUndefined()
+  })
+
+  it("clears stored credentials with clearStoredAuth", async () => {
+    const { setStoredAuth, getStoredAuth, clearStoredAuth } = await import("@/lib/api")
+
+    setStoredAuth("api_key", "secret-key")
+    expect(getStoredAuth()).toEqual({ mode: "api_key", credential: "secret-key" })
+
+    clearStoredAuth()
+    expect(getStoredAuth()).toEqual({ mode: "none", credential: "" })
+    expect(sessionStorage.getItem("ironveil.auth_mode")).toBeNull()
+    expect(sessionStorage.getItem("ironveil.auth_credential")).toBeNull()
   })
 
   it("parses JSON responses with apiFetchJson", async () => {
@@ -79,5 +125,25 @@ describe("api client", () => {
       code: "auth_required",
       message: "Authentication required",
     })
+  })
+
+  it("returns the degraded /health body instead of throwing on 503", async () => {
+    const degradedBody = {
+      status: "degraded",
+      version: "0.2.0",
+      upstream: { healthy: false, host: "db.internal" },
+    }
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+      json: async () => degradedBody,
+    })
+    global.fetch = fetchMock as unknown as typeof fetch
+
+    const { fetchHealth } = await import("@/lib/api")
+    const health = await fetchHealth()
+
+    expect(health.status).toBe("degraded")
+    expect(health.upstream?.healthy).toBe(false)
   })
 })

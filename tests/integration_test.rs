@@ -1,21 +1,32 @@
 //! Integration tests for IronVeil database proxy
 //!
-//! These tests require running database containers. To run:
+//! Service-dependent tests need the compose stack:
 //! ```bash
-//! docker compose up -d
+//! docker compose up -d --build
 //! cargo test --test integration_test
 //! ```
+//!
+//! Layering:
+//! - `postgres_tests` / `mysql_tests` — protocol **handshake / liveness only**
+//!   (they prove a byte came back; they do **not** assert masking).
+//! - `masking_wire_tests` — real `SELECT` through the proxy, asserts plaintext
+//!   PII is absent from the client-visible result set.
+//! - Full multi-protocol matrix lives in `scripts/test_e2e.sh` (CI runs both
+//!   `postgres` and `mysql`).
 
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
-/// Test configuration
+/// Test configuration (matches docker-compose.yml defaults)
 const PROXY_HOST: &str = "127.0.0.1";
 const PROXY_PORT: u16 = 6543;
+/// Upstream Postgres published by compose (not the proxy).
+const UPSTREAM_PG_PORT: u16 = 5432;
 const API_PORT: u16 = 3001;
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
+const PG_PASSWORD: &str = "password";
 
 #[test]
 fn test_strict_service_mode_defaults_to_non_strict() {
@@ -76,26 +87,80 @@ async fn ensure_proxy_running(test_name: &str) -> bool {
     false
 }
 
-/// Helper to check if the proxy is running
-async fn is_proxy_running() -> bool {
-    timeout(
-        CONNECTION_TIMEOUT,
-        TcpStream::connect(format!("{}:{}", PROXY_HOST, PROXY_PORT)),
-    )
-    .await
-    .is_ok()
+async fn ensure_upstream_postgres(test_name: &str) -> bool {
+    if is_port_open(UPSTREAM_PG_PORT).await {
+        return true;
+    }
+
+    let message = format!(
+        "Upstream Postgres not running on port {} (needed to seed plaintext PII)",
+        UPSTREAM_PG_PORT
+    );
+    if should_require_services() {
+        panic!("{test_name}: {message}. Start required services before running integration tests.");
+    }
+
+    eprintln!("Skipping test: {test_name} ({message})");
+    false
 }
 
-/// Helper to check if API is running
+/// Helper to check if the proxy is running.
+/// `timeout(..).await.is_ok()` was true for a *refused* connection
+/// (Ok(Err(ConnectionRefused))), so strict mode never fired and CI passed
+/// against a proxy that had never started.
+async fn is_proxy_running() -> bool {
+    is_port_open(PROXY_PORT).await
+}
+
+/// Helper to check if the management API is actually answering HTTP.
+///
+/// TCP connect alone is not enough: Docker may publish port 3001 while the
+/// process only listens on loopback *inside* the container, so the host sees
+/// an accepted-then-reset connection. Probe `/health` instead.
 async fn is_api_running() -> bool {
+    let client = reqwest::Client::new();
+    match client
+        .get(format!("http://{}:{}/health", PROXY_HOST, API_PORT))
+        .timeout(CONNECTION_TIMEOUT)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            status == 200 || status == 503
+        }
+        Err(_) => false,
+    }
+}
+
+async fn is_port_open(port: u16) -> bool {
     matches!(
         timeout(
             CONNECTION_TIMEOUT,
-            TcpStream::connect(format!("{}:{}", PROXY_HOST, API_PORT)),
+            TcpStream::connect(format!("{}:{}", PROXY_HOST, port)),
         )
         .await,
         Ok(Ok(_))
     )
+}
+
+fn pg_conn_str(port: u16) -> String {
+    format!(
+        "host={} port={} user=postgres password={} dbname=postgres",
+        PROXY_HOST, port, PG_PASSWORD
+    )
+}
+
+/// Connect with tokio-postgres and spawn the connection driver.
+async fn connect_postgres(port: u16) -> Result<tokio_postgres::Client, tokio_postgres::Error> {
+    let (client, connection) =
+        tokio_postgres::connect(&pg_conn_str(port), tokio_postgres::NoTls).await?;
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("postgres connection closed: {e}");
+        }
+    });
+    Ok(client)
 }
 
 async fn assert_protected_json_response(
@@ -114,17 +179,25 @@ async fn assert_protected_json_response(
         );
     } else if status == 401 {
         let body: serde_json::Value = resp.json().await.expect("Failed to parse JSON body");
-        assert_eq!(
-            body.get("error").and_then(|v| v.as_str()),
-            Some("Authentication required"),
-            "{} unauthorized response should include auth error",
-            endpoint_name
-        );
+        let error = body.get("error").and_then(|v| v.as_str());
+        // Unauthenticated request → "Authentication required" (+ methods).
+        // Wrong key → "Invalid API key". Both are valid protected-endpoint 401s.
         assert!(
-            body.get("methods").is_some(),
-            "{} unauthorized response should include auth methods",
-            endpoint_name
+            matches!(
+                error,
+                Some("Authentication required") | Some("Invalid API key")
+            ),
+            "{} unauthorized response should include auth error, got {:?}",
+            endpoint_name,
+            error
         );
+        if error == Some("Authentication required") {
+            assert!(
+                body.get("methods").is_some(),
+                "{} unauthorized response should include auth methods",
+                endpoint_name
+            );
+        }
     } else {
         panic!("{} should return 200 or 401, got {}", endpoint_name, status);
     }
@@ -297,7 +370,11 @@ mod api_tests {
     }
 }
 
-mod postgres_tests {
+/// Protocol handshake / liveness only.
+///
+/// These tests intentionally stop at the first proxy response byte. They are
+/// **not** masking coverage — see `masking_wire_tests` and `scripts/test_e2e.sh`.
+mod postgres_handshake_tests {
     use super::*;
 
     /// PostgreSQL startup message
@@ -319,78 +396,60 @@ mod postgres_tests {
         msg
     }
 
-    /// Test basic PostgreSQL proxy connection
+    /// Handshake only: proxy answers a startup with Auth/Error/ParameterStatus.
     #[tokio::test]
-    async fn test_postgres_connection() {
-        if !ensure_proxy_running("test_postgres_connection").await {
+    async fn test_postgres_handshake_reaches_auth() {
+        if !ensure_proxy_running("test_postgres_handshake_reaches_auth").await {
             return;
         }
 
-        let mut stream = match timeout(
+        // Past this point the proxy answered a TCP connect, so a failure is
+        // a real defect: fail rather than skip.
+        let mut stream = timeout(
             CONNECTION_TIMEOUT,
             TcpStream::connect(format!("{}:{}", PROXY_HOST, PROXY_PORT)),
         )
         .await
-        {
-            Ok(Ok(s)) => s,
-            Ok(Err(e)) => {
-                eprintln!("Failed to connect to proxy: {}", e);
-                return;
-            }
-            Err(_) => {
-                eprintln!("Connection timeout");
-                return;
-            }
-        };
+        .expect("connection to a live proxy timed out")
+        .expect("connection to a live proxy failed");
 
         // Send startup message
         let startup = build_startup_message("postgres", "postgres");
-        if let Err(e) = stream.write_all(&startup).await {
-            eprintln!("Failed to send startup message: {}", e);
-            return;
-        }
+        stream
+            .write_all(&startup)
+            .await
+            .expect("failed to send startup message");
 
         // Read response (should get authentication request or error)
         let mut buf = [0u8; 1024];
-        match timeout(CONNECTION_TIMEOUT, stream.read(&mut buf)).await {
-            Ok(Ok(n)) if n > 0 => {
-                // We got a response - the proxy is working
-                // First byte indicates message type
-                let msg_type = buf[0] as char;
-                assert!(
-                    msg_type == 'R' || msg_type == 'E' || msg_type == 'S',
-                    "Should receive Authentication (R), Error (E), or SSL (S) response, got: {}",
-                    msg_type
-                );
-            }
-            Ok(Ok(_)) => {
-                eprintln!("Connection closed by proxy (0 bytes read)");
-            }
-            Ok(Err(e)) => {
-                eprintln!("Failed to read response: {}", e);
-            }
-            Err(_) => {
-                eprintln!("Read timeout");
-            }
-        }
+        let n = timeout(CONNECTION_TIMEOUT, stream.read(&mut buf))
+            .await
+            .expect("read from a live proxy timed out")
+            .expect("read from a live proxy failed");
+        assert!(n > 0, "proxy closed the connection without responding");
+
+        let msg_type = buf[0] as char;
+        assert!(
+            msg_type == 'R' || msg_type == 'E' || msg_type == 'S',
+            "Should receive Authentication (R), Error (E), or SSL (S) response, got: {}",
+            msg_type
+        );
     }
 
-    /// Test SSL request handling
+    /// Handshake only: SSLRequest gets a single-byte 'S' or 'N'.
     #[tokio::test]
-    async fn test_postgres_ssl_request() {
-        if !ensure_proxy_running("test_postgres_ssl_request").await {
+    async fn test_postgres_ssl_request_byte() {
+        if !ensure_proxy_running("test_postgres_ssl_request_byte").await {
             return;
         }
 
-        let mut stream = match timeout(
+        let mut stream = timeout(
             CONNECTION_TIMEOUT,
             TcpStream::connect(format!("{}:{}", PROXY_HOST, PROXY_PORT)),
         )
         .await
-        {
-            Ok(Ok(s)) => s,
-            _ => return,
-        };
+        .expect("connection to a live proxy timed out")
+        .expect("connection to a live proxy failed");
 
         // Send SSL request (8 bytes: length 8 + SSL code 80877103)
         let ssl_request = [
@@ -398,34 +457,31 @@ mod postgres_tests {
             0x04, 0xd2, 0x16, 0x2f, // SSL request code: 80877103
         ];
 
-        if let Err(e) = stream.write_all(&ssl_request).await {
-            eprintln!("Failed to send SSL request: {}", e);
-            return;
-        }
+        stream
+            .write_all(&ssl_request)
+            .await
+            .expect("failed to send SSL request");
 
         // Read response (should be 'S' for SSL supported or 'N' for not supported)
         let mut buf = [0u8; 1];
-        match timeout(CONNECTION_TIMEOUT, stream.read(&mut buf)).await {
-            Ok(Ok(1)) => {
-                let response = buf[0] as char;
-                assert!(
-                    response == 'S' || response == 'N',
-                    "SSL response should be 'S' or 'N', got: {}",
-                    response
-                );
-            }
-            _ => {
-                eprintln!("Failed to read SSL response");
-            }
-        }
+        let n = timeout(CONNECTION_TIMEOUT, stream.read(&mut buf))
+            .await
+            .expect("SSL response timed out")
+            .expect("failed to read SSL response");
+        assert_eq!(n, 1, "expected a one-byte SSL response");
+
+        let response = buf[0] as char;
+        assert!(
+            response == 'S' || response == 'N',
+            "SSL response should be 'S' or 'N', got: {}",
+            response
+        );
     }
 
-    /// Test connection rejection when upstream is unavailable
+    /// Liveness only: with a live proxy, startup either gets a response or a
+    /// clean close. Does not assert masking or SQL semantics.
     #[tokio::test]
-    async fn test_postgres_upstream_unavailable() {
-        // This test connects to a port where no upstream is available
-        // The proxy should handle this gracefully
-
+    async fn test_postgres_proxy_accepts_startup() {
         let mut stream = match timeout(
             CONNECTION_TIMEOUT,
             TcpStream::connect(format!("{}:{}", PROXY_HOST, PROXY_PORT)),
@@ -433,267 +489,318 @@ mod postgres_tests {
         .await
         {
             Ok(Ok(s)) => s,
-            _ => return, // Proxy not running, skip test
+            _ => {
+                if should_require_services() {
+                    panic!(
+                        "test_postgres_proxy_accepts_startup: proxy not running on port {}",
+                        PROXY_PORT
+                    );
+                }
+                eprintln!("Skipping test: proxy not running");
+                return;
+            }
         };
 
-        // Send startup message
         let startup = build_startup_message("postgres", "postgres");
-        if stream.write_all(&startup).await.is_err() {
-            return;
-        }
+        stream
+            .write_all(&startup)
+            .await
+            .expect("failed to send startup message to a live proxy");
 
-        // Read response - might be error if upstream is down
         let mut buf = [0u8; 1024];
         match timeout(Duration::from_secs(10), stream.read(&mut buf)).await {
             Ok(Ok(n)) if n > 0 => {
-                // Got a response, proxy is handling the connection
-                // Could be auth request (upstream available) or error (upstream down)
-                println!("Received {} bytes response", n);
+                // Auth request, error, or parameter status — any framed reply is fine.
+                println!("Handshake liveness: received {n} bytes");
             }
-            _ => {
-                // Connection closed or timeout - also valid behavior
-                println!("Connection closed or timed out");
+            Ok(Ok(_)) => {
+                // Clean EOF is also acceptable (e.g. upstream down after accept).
+                println!("Handshake liveness: connection closed without payload");
             }
+            Ok(Err(e)) => panic!("unexpected IO error from live proxy: {e}"),
+            Err(_) => panic!("timed out waiting for any handshake response from live proxy"),
         }
     }
 }
 
-mod mysql_tests {
+/// Protocol handshake / liveness only (not masking coverage).
+///
+/// Compose runs Postgres-mode proxy; a MySQL-mode listener is optional and is
+/// covered for masking by `scripts/test_e2e.sh mysql` in CI.
+mod mysql_handshake_tests {
     use super::*;
 
     const MYSQL_PROXY_PORT: u16 = 3307; // Default MySQL proxy port
 
     async fn is_mysql_proxy_running() -> bool {
-        timeout(
-            CONNECTION_TIMEOUT,
-            TcpStream::connect(format!("{}:{}", PROXY_HOST, MYSQL_PROXY_PORT)),
-        )
-        .await
-        .is_ok()
+        is_port_open(MYSQL_PROXY_PORT).await
     }
 
-    /// Test MySQL proxy connection (if MySQL mode is running)
+    /// Handshake only: MySQL-mode proxy sends an initial HandshakeV10 packet.
+    /// Soft-skip when MySQL proxy is not up (compose is Postgres-mode by default).
+    /// Even in CI, absence of a MySQL listener is not a failure here — MySQL
+    /// masking is gated by the dedicated e2e job.
     #[tokio::test]
-    async fn test_mysql_connection() {
+    async fn test_mysql_handshake_v10_header() {
         if !is_mysql_proxy_running().await {
-            if should_require_services() {
-                panic!(
-                    "test_mysql_connection: MySQL proxy not running on port {}. Start required services before running integration tests.",
-                    MYSQL_PROXY_PORT
-                );
-            }
             eprintln!(
-                "Skipping test: MySQL proxy not running on port {}",
+                "Skipping test: MySQL proxy not running on port {} \
+                 (expected when compose is in Postgres mode; see e2e mysql job)",
                 MYSQL_PROXY_PORT
             );
             return;
         }
 
-        let mut stream = match timeout(
+        let mut stream = timeout(
             CONNECTION_TIMEOUT,
             TcpStream::connect(format!("{}:{}", PROXY_HOST, MYSQL_PROXY_PORT)),
         )
         .await
-        {
-            Ok(Ok(s)) => s,
-            _ => return,
-        };
+        .expect("connection to a live MySQL proxy timed out")
+        .expect("connection to a live MySQL proxy failed");
 
         // MySQL server should send initial handshake packet
         let mut buf = [0u8; 1024];
-        match timeout(CONNECTION_TIMEOUT, stream.read(&mut buf)).await {
-            Ok(Ok(n)) if n >= 4 => {
-                // MySQL packet header: 3 bytes length + 1 byte sequence
-                let length = (buf[0] as u32) | ((buf[1] as u32) << 8) | ((buf[2] as u32) << 16);
-                let sequence = buf[3];
+        let n = timeout(CONNECTION_TIMEOUT, stream.read(&mut buf))
+            .await
+            .expect("MySQL handshake read timed out")
+            .expect("MySQL handshake read failed");
+        assert!(
+            n >= 5,
+            "MySQL handshake should be at least 5 bytes, got {n}"
+        );
 
-                assert!(length > 0, "MySQL handshake packet should have content");
-                assert_eq!(sequence, 0, "Initial handshake should have sequence 0");
-
-                // Protocol version should be 10 (0x0a)
-                if n > 4 {
-                    assert_eq!(
-                        buf[4], 10,
-                        "MySQL protocol version should be 10, got: {}",
-                        buf[4]
-                    );
-                }
-            }
-            _ => {
-                eprintln!("Received too few bytes or failed to read MySQL handshake");
-            }
-        }
+        // MySQL packet header: 3 bytes length + 1 byte sequence
+        let length = (buf[0] as u32) | ((buf[1] as u32) << 8) | ((buf[2] as u32) << 16);
+        assert!(length > 0, "MySQL handshake packet should have content");
+        assert_eq!(buf[3], 0, "Initial handshake should have sequence 0");
+        assert_eq!(
+            buf[4], 10,
+            "MySQL protocol version should be 10, got: {}",
+            buf[4]
+        );
     }
 }
 
-mod masking_tests {
-    /// Test that email patterns are detected correctly
-    #[test]
-    fn test_email_detection_pattern() {
-        let patterns = [
-            ("test@example.com", true),
-            ("user.name@domain.org", true),
-            ("invalid-email", false),
-            ("@nodomain.com", false),
-            ("noat.domain.com", false),
-        ];
+/// Real SELECT-through-proxy masking assertions.
+///
+/// Seeds plaintext via the upstream port, then queries the **proxy** port and
+/// asserts the client never sees the original PII. This is the Rust-side gate
+/// for the product promise; the bash e2e suite extends the same idea to MySQL
+/// and richer shapes (JSON, arrays, heuristics).
+mod masking_wire_tests {
+    use super::*;
 
-        let email_regex =
-            regex::Regex::new(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$").unwrap();
+    const PLAINTEXT_EMAIL: &str = "wire-mask-assert@example.com";
+    const PLAINTEXT_PHONE: &str = "555-000-9999";
+    const MARKER_NOTE: &str = "ironveil-wire-mask-marker";
 
-        for (input, expected) in patterns {
-            let result = email_regex.is_match(input);
+    #[tokio::test]
+    async fn test_postgres_select_through_proxy_masks_email() {
+        if !ensure_proxy_running("test_postgres_select_through_proxy_masks_email").await {
+            return;
+        }
+        if !ensure_upstream_postgres("test_postgres_select_through_proxy_masks_email").await {
+            return;
+        }
+
+        // Seed plaintext on the real database (bypass the proxy).
+        let upstream = connect_postgres(UPSTREAM_PG_PORT)
+            .await
+            .expect("failed to connect to upstream Postgres for seeding");
+
+        upstream
+            .batch_execute(
+                r#"
+                CREATE TABLE IF NOT EXISTS users (
+                    id SERIAL PRIMARY KEY,
+                    email TEXT,
+                    phone_number TEXT,
+                    address TEXT
+                );
+                "#,
+            )
+            .await
+            .expect("failed to ensure users table exists on upstream");
+
+        // Use a stable marker column value that is not itself PII so we can
+        // re-select the row without depending on the masked email.
+        // address is not rule-covered by default proxy.yaml heuristics for free text
+        // in a way that would strip our marker (heuristics: email/phone/ssn only).
+        upstream
+            .execute(
+                "DELETE FROM users WHERE address = $1 OR email = $2",
+                &[&MARKER_NOTE, &PLAINTEXT_EMAIL],
+            )
+            .await
+            .expect("failed to clean previous wire-mask seed rows");
+
+        upstream
+            .execute(
+                "INSERT INTO users (email, phone_number, address) VALUES ($1, $2, $3)",
+                &[&PLAINTEXT_EMAIL, &PLAINTEXT_PHONE, &MARKER_NOTE],
+            )
+            .await
+            .expect("failed to seed plaintext PII on upstream");
+
+        // Query through the proxy using the *simple* query protocol (same path
+        // as `psql -c` / the bash e2e suite). `Client::query` uses extended
+        // Parse/Bind/Execute; that path has separate codec coverage and is not
+        // what this wire assert is pinning.
+        let proxy = connect_postgres(PROXY_PORT)
+            .await
+            .expect("failed to connect to Postgres *through the proxy*");
+
+        let sql = format!(
+            "SELECT email, phone_number, address FROM users WHERE address = '{}'",
+            MARKER_NOTE.replace('\'', "''")
+        );
+        let messages = proxy
+            .simple_query(&sql)
+            .await
+            .expect("SELECT through proxy failed");
+
+        let mut data_rows = Vec::new();
+        for msg in messages {
+            if let tokio_postgres::SimpleQueryMessage::Row(row) = msg {
+                data_rows.push(row);
+            }
+        }
+
+        assert!(
+            !data_rows.is_empty(),
+            "expected at least one seeded row through the proxy"
+        );
+
+        for row in &data_rows {
+            let email = row
+                .get("email")
+                .expect("email column missing from proxy response")
+                .to_string();
+            let phone = row
+                .get("phone_number")
+                .expect("phone_number column missing from proxy response")
+                .to_string();
+            let address = row
+                .get("address")
+                .expect("address column missing from proxy response")
+                .to_string();
+
+            // Marker must survive so we know we read the right row.
             assert_eq!(
-                result, expected,
-                "Email detection failed for '{}': expected {}, got {}",
-                input, expected, result
+                address, MARKER_NOTE,
+                "non-PII marker column should pass through unmasked"
+            );
+
+            assert_ne!(
+                email, PLAINTEXT_EMAIL,
+                "proxy must not return the plaintext email"
+            );
+            assert!(
+                !email.contains("wire-mask-assert"),
+                "proxy must not leak the email local-part; got {email:?}"
+            );
+            assert!(
+                email.contains('@'),
+                "email strategy should still look like an email; got {email:?}"
+            );
+
+            assert_ne!(
+                phone, PLAINTEXT_PHONE,
+                "proxy must not return the plaintext phone"
+            );
+            assert!(
+                !phone.contains("555-000-9999"),
+                "proxy must not leak the phone digits; got {phone:?}"
             );
         }
-    }
 
-    /// Test credit card pattern detection
-    #[test]
-    fn test_credit_card_detection_pattern() {
-        let patterns = [
-            ("4111111111111111", true),  // Visa test number
-            ("5500000000000004", true),  // Mastercard test
-            ("378282246310005", true),   // Amex test
-            ("1234", false),             // Too short
-            ("abcd1234abcd1234", false), // Contains letters
-        ];
-
-        let cc_regex = regex::Regex::new(r"^\d{13,19}$").unwrap();
-
-        for (input, expected) in patterns {
-            let result = cc_regex.is_match(input);
-            assert_eq!(
-                result, expected,
-                "Credit card detection failed for '{}': expected {}, got {}",
-                input, expected, result
-            );
-        }
-    }
-
-    /// Test SSN pattern detection
-    #[test]
-    fn test_ssn_detection_pattern() {
-        let patterns = [
-            ("123-45-6789", true),
-            ("000-00-0000", true),
-            ("12345-6789", false),
-            ("123-456-789", false),
-            ("1234567890", false),
-        ];
-
-        let ssn_regex = regex::Regex::new(r"^\d{3}-\d{2}-\d{4}$").unwrap();
-
-        for (input, expected) in patterns {
-            let result = ssn_regex.is_match(input);
-            assert_eq!(
-                result, expected,
-                "SSN detection failed for '{}': expected {}, got {}",
-                input, expected, result
-            );
-        }
-    }
-
-    /// Test IP address detection
-    #[test]
-    fn test_ip_address_detection_pattern() {
-        let patterns = [
-            ("192.168.1.1", true),
-            ("10.0.0.255", true),
-            ("256.1.1.1", true), // Regex doesn't validate range
-            ("1.2.3", false),
-            ("1.2.3.4.5", false),
-        ];
-
-        let ip_regex = regex::Regex::new(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$").unwrap();
-
-        for (input, expected) in patterns {
-            let result = ip_regex.is_match(input);
-            assert_eq!(
-                result, expected,
-                "IP detection failed for '{}': expected {}, got {}",
-                input, expected, result
-            );
-        }
-    }
-
-    /// Test phone number detection
-    #[test]
-    fn test_phone_detection_pattern() {
-        let patterns = [
-            ("+1-555-123-4567", true),
-            ("+1 (555) 123-4567", true),
-            ("+44 20 7123 4567", true),
-            ("123-4567", false), // Too short, no country code
-        ];
-
-        // Phone regex that requires country code prefix
-        let phone_regex =
-            regex::Regex::new(r"^\+\d{1,3}[-.\s]?\(?\d{1,4}\)?[-.\s]?\d{1,4}[-.\s]?\d{1,9}$")
-                .unwrap();
-
-        for (input, expected) in patterns {
-            let result = phone_regex.is_match(input);
-            assert_eq!(
-                result, expected,
-                "Phone detection failed for '{}': expected {}, got {}",
-                input, expected, result
-            );
-        }
+        // Best-effort cleanup on upstream (ignore errors if the connection dropped).
+        let _ = upstream
+            .execute("DELETE FROM users WHERE address = $1", &[&MARKER_NOTE])
+            .await;
     }
 }
 
-mod protocol_tests {
-    /// Test PostgreSQL message parsing
+// The previous `masking_tests` and `protocol_tests` modules asserted against
+// inline regexes and hand-rolled byte arithmetic that had already drifted from
+// production (their credit-card test accepted a 15-digit Amex the shipped
+// scanner rejected). They are replaced here with tests that drive the real
+// scanner and codecs through the library crate.
+mod scanner_tests {
+    use iron_veil::scanner::{PiiScanner, PiiType};
+
     #[test]
-    fn test_postgres_message_length_calculation() {
-        // PostgreSQL message format: Type (1 byte) + Length (4 bytes) + Payload
-        // Length includes itself but NOT the type byte
+    fn test_real_scanner_detects_expected_types() {
+        let scanner = PiiScanner::shared();
 
-        let payload = b"SELECT 1";
-        let msg_type: u8 = b'Q'; // Query message
+        assert_eq!(scanner.scan("test@example.com"), Some(PiiType::Email));
+        assert_eq!(scanner.scan("123-45-6789"), Some(PiiType::Ssn));
+        assert_eq!(scanner.scan("+1-555-123-4567"), Some(PiiType::Phone));
+        assert_eq!(scanner.scan("192.168.1.1"), Some(PiiType::IpAddress));
+        assert_eq!(scanner.scan("1990-01-15"), Some(PiiType::DateOfBirth));
+        // Luhn-valid Visa and Amex
+        assert_eq!(scanner.scan("4532015112830366"), Some(PiiType::CreditCard));
+        assert_eq!(scanner.scan("378282246310005"), Some(PiiType::CreditCard));
 
-        // Total length = 4 (length field) + payload.len()
-        let total_length: u32 = 4 + payload.len() as u32;
+        // Non-PII must survive untouched
+        assert_eq!(scanner.scan("not-an-email"), None);
+        assert_eq!(scanner.scan("John Doe"), None);
+        // A Luhn-failing 16-digit identifier is an order number, not a card
+        assert_eq!(scanner.scan("1234567890123456"), None);
+    }
+}
 
-        let mut message = Vec::new();
-        message.push(msg_type);
-        message.extend_from_slice(&total_length.to_be_bytes());
-        message.extend_from_slice(payload);
+mod codec_tests {
+    use bytes::BytesMut;
+    use iron_veil::protocol::mysql::{MySqlCodec, MySqlMessage};
+    use iron_veil::protocol::postgres::{PgMessage, PostgresCodec};
+    use tokio_util::codec::Decoder;
 
-        // Verify message structure
-        assert_eq!(message[0], b'Q');
-        let parsed_length = u32::from_be_bytes([message[1], message[2], message[3], message[4]]);
-        assert_eq!(parsed_length, 12); // 4 + 8 = 12
+    #[test]
+    fn test_postgres_codec_decodes_a_real_query() {
+        let payload = b"SELECT 1\0";
+        let mut src = BytesMut::new();
+        src.extend_from_slice(b"Q");
+        src.extend_from_slice(&((payload.len() + 4) as u32).to_be_bytes());
+        src.extend_from_slice(payload);
+
+        let mut codec = PostgresCodec::new_upstream();
+        let msg = codec.decode(&mut src).unwrap().unwrap();
+        match msg {
+            PgMessage::Query(q) => assert_eq!(&q.query[..], b"SELECT 1"),
+            other => panic!("expected Query, got {:?}", other),
+        }
     }
 
-    /// Test MySQL packet length calculation
     #[test]
-    fn test_mysql_packet_length_calculation() {
-        // MySQL packet format: Length (3 bytes LE) + Sequence (1 byte) + Payload
+    fn test_postgres_codec_rejects_an_oversized_frame() {
+        // Four bytes of 0xFF used to force a ~4 GiB reservation pre-auth.
+        let mut src = BytesMut::new();
+        src.extend_from_slice(b"Q");
+        src.extend_from_slice(&u32::MAX.to_be_bytes());
+        let mut codec = PostgresCodec::new_upstream();
+        assert!(codec.decode(&mut src).is_err());
+    }
 
-        let payload = b"SELECT 1";
-        let sequence: u8 = 0;
+    #[test]
+    fn test_mysql_codec_decodes_a_real_com_query() {
+        let mut payload = vec![0x03];
+        payload.extend_from_slice(b"SELECT email FROM users");
+        let mut src = BytesMut::new();
+        src.extend_from_slice(&[
+            (payload.len() & 0xff) as u8,
+            ((payload.len() >> 8) & 0xff) as u8,
+            ((payload.len() >> 16) & 0xff) as u8,
+            0,
+        ]);
+        src.extend_from_slice(&payload);
 
-        let length = payload.len() as u32;
-        let length_bytes = [
-            (length & 0xFF) as u8,
-            ((length >> 8) & 0xFF) as u8,
-            ((length >> 16) & 0xFF) as u8,
-        ];
-
-        let mut packet = Vec::new();
-        packet.extend_from_slice(&length_bytes);
-        packet.push(sequence);
-        packet.extend_from_slice(payload);
-
-        // Verify packet structure
-        let parsed_length =
-            (packet[0] as u32) | ((packet[1] as u32) << 8) | ((packet[2] as u32) << 16);
-        assert_eq!(parsed_length, 8);
-        assert_eq!(packet[3], 0); // sequence
+        let mut codec = MySqlCodec::new_server_awaiting_command();
+        let msg = codec.decode(&mut src).unwrap().unwrap();
+        match msg {
+            MySqlMessage::Query(q) => assert_eq!(&q.query[..], b"SELECT email FROM users"),
+            other => panic!("expected Query, got {:?}", other),
+        }
     }
 }

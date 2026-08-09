@@ -46,8 +46,6 @@ pub enum AuditEventType {
     DatabaseScan,
     /// Schema query
     SchemaQuery,
-    /// API access (general)
-    ApiAccess,
 }
 
 /// Outcome of an audit event
@@ -123,6 +121,12 @@ impl AuditEntry {
     /// Set the authentication method
     pub fn with_auth_method(mut self, method: AuthMethod) -> Self {
         self.auth_method = Some(method);
+        self
+    }
+
+    /// Set the client IP address
+    pub fn with_client_ip(mut self, client_ip: impl Into<String>) -> Self {
+        self.client_ip = Some(client_ip.into());
         self
     }
 
@@ -225,17 +229,35 @@ pub struct AuditLogger {
     config: Arc<RwLock<AuditConfig>>,
     entries: Arc<RwLock<VecDeque<AuditEntry>>>,
     log_file_path: Arc<RwLock<Option<PathBuf>>>,
+    /// Serializes the metadata-check / rotate / append sequence so two
+    /// concurrent writers cannot rotate over each other's generations.
+    file_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AuditLogger {
     /// Create a new audit logger with the given configuration
     pub fn new(config: AuditConfig) -> Self {
+        if config.enabled && !config.log_to_stdout && config.log_file.is_none() {
+            warn!(
+                "audit logging is enabled but has no durable sink: entries live only in a \
+                 {MAX_MEMORY_ENTRIES}-entry memory ring and are lost on restart. Set \
+                 audit.log_to_stdout: true or audit.log_file."
+            );
+        }
         let log_file_path = config.log_file.as_ref().map(PathBuf::from);
         Self {
             config: Arc::new(RwLock::new(config)),
             entries: Arc::new(RwLock::new(VecDeque::with_capacity(MAX_MEMORY_ENTRIES))),
             log_file_path: Arc::new(RwLock::new(log_file_path)),
+            file_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    /// Re-apply a reloaded audit configuration (hot reload support).
+    pub async fn apply_config(&self, config: AuditConfig) {
+        let new_path = config.log_file.as_ref().map(PathBuf::from);
+        *self.log_file_path.write().await = new_path;
+        *self.config.write().await = config;
     }
 
     /// Check if a specific event type should be logged
@@ -301,6 +323,7 @@ impl AuditLogger {
         let entry = entry.clone();
         let config = config.clone();
 
+        let _guard = self.file_lock.lock().await;
         tokio::task::spawn_blocking(move || Self::write_to_file_blocking(&path, &entry, &config))
             .await
             .map_err(|e| std::io::Error::other(format!("audit write task failed: {}", e)))?
@@ -667,7 +690,7 @@ mod tests {
 
         // Add more than MAX_MEMORY_ENTRIES
         for i in 0..MAX_MEMORY_ENTRIES + 100 {
-            let mut entry = AuditEntry::new(AuditEventType::ApiAccess, AuditOutcome::Success);
+            let mut entry = AuditEntry::new(AuditEventType::ConfigChange, AuditOutcome::Success);
             entry.id = format!("entry-{}", i);
             logger.log(entry).await;
         }

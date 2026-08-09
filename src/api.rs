@@ -2,6 +2,7 @@ use crate::audit::{AuditEventType, AuditLogger, AuditOutcome, AuthMethod};
 use crate::config::MaskingRule;
 use crate::db_scanner::{DbScanner, ScanConfig, ScanError};
 use crate::state::{AppState, DbProtocol};
+use axum::extract::ConnectInfo;
 use axum::{
     Json, Router,
     body::Body,
@@ -15,10 +16,17 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashSet;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::Ordering;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
+
+/// Compare secrets without a short-circuiting byte comparison: hashing both
+/// sides to fixed-length digests removes the length and prefix timing oracle.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(a) == Sha256::digest(b)
+}
 
 /// JWT Claims structure
 #[derive(Debug, Serialize, Deserialize)]
@@ -43,16 +51,23 @@ fn validate_jwt(token: &str, secret: &str) -> Result<Claims, jsonwebtoken::error
 }
 
 /// Middleware to validate API key or JWT for protected endpoints
-async fn api_auth(State(state): State<AppState>, request: Request<Body>, next: Next) -> Response {
+async fn api_auth(
+    State(state): State<AppState>,
+    ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
     let config = state.config.read().await;
     let endpoint = request.uri().path().to_string();
     let method = request.method().to_string();
+    let client_ip = client_addr.ip().to_string();
 
     let api_config = config.api.as_ref();
     let api_key = api_config.and_then(|c| c.api_key.as_ref());
     let jwt_secret = api_config.and_then(|c| c.jwt_secret.as_ref());
 
-    // If neither API key nor JWT is configured, allow all requests
+    // With no credentials configured the server only ever binds loopback
+    // (start_api_server refuses anything else), so allow local requests.
     if api_key.is_none() && jwt_secret.is_none() {
         drop(config);
         return next.run(request).await;
@@ -65,13 +80,14 @@ async fn api_auth(State(state): State<AppState>, request: Request<Body>, next: N
             .get("X-API-Key")
             .and_then(|v| v.to_str().ok())
     {
-        if provided_key == expected_key {
+        if constant_time_eq(provided_key.as_bytes(), expected_key.as_bytes()) {
             drop(config);
             // Log successful API key auth
             state
                 .audit_logger
                 .log(
                     AuditLogger::auth_success(AuthMethod::ApiKey, None)
+                        .with_client_ip(&client_ip)
                         .with_endpoint(&endpoint)
                         .with_method(&method),
                 )
@@ -84,6 +100,7 @@ async fn api_auth(State(state): State<AppState>, request: Request<Body>, next: N
                 .audit_logger
                 .log(
                     AuditLogger::auth_failure(AuthMethod::ApiKey, "Invalid API key")
+                        .with_client_ip(&client_ip)
                         .with_endpoint(&endpoint)
                         .with_method(&method),
                 )
@@ -114,6 +131,7 @@ async fn api_auth(State(state): State<AppState>, request: Request<Body>, next: N
                     .audit_logger
                     .log(
                         AuditLogger::auth_success(AuthMethod::Jwt, Some(claims.sub))
+                            .with_client_ip(&client_ip)
                             .with_endpoint(&endpoint)
                             .with_method(&method),
                     )
@@ -131,6 +149,7 @@ async fn api_auth(State(state): State<AppState>, request: Request<Body>, next: N
                             AuthMethod::Jwt,
                             format!("JWT validation failed: {}", e),
                         )
+                        .with_client_ip(&client_ip)
                         .with_endpoint(&endpoint)
                         .with_method(&method),
                     )
@@ -152,6 +171,7 @@ async fn api_auth(State(state): State<AppState>, request: Request<Body>, next: N
         .audit_logger
         .log(
             AuditLogger::auth_denied()
+                .with_client_ip(&client_ip)
                 .with_endpoint(&endpoint)
                 .with_method(&method),
         )
@@ -180,14 +200,11 @@ async fn api_auth(State(state): State<AppState>, request: Request<Body>, next: N
         .into_response()
 }
 
-pub async fn start_api_server(port: u16, state: AppState) -> anyhow::Result<()> {
-    // Public routes (no auth required)
-    let public_routes = Router::new()
-        .route("/health", get(health_check))
-        .route("/metrics", get(get_metrics));
-
-    // Protected routes (require API key or JWT if configured)
-    let protected_routes = Router::new()
+/// The authenticated half of the management API. Extracted so tests can drive
+/// the real router (and therefore the real auth middleware) rather than
+/// calling handlers directly and bypassing authorization entirely.
+fn protected_router(state: AppState) -> Router<AppState> {
+    Router::new()
         .route("/rules", get(get_rules).post(add_rule))
         .route("/rules/delete", post(delete_rule))
         .route("/rules/export", get(export_rules))
@@ -200,29 +217,94 @@ pub async fn start_api_server(port: u16, state: AppState) -> anyhow::Result<()> 
         .route("/schema", post(get_schema))
         .route("/logs", get(get_logs))
         .route("/audit", get(get_audit_logs))
-        .layer(middleware::from_fn_with_state(state.clone(), api_auth));
+        .layer(middleware::from_fn_with_state(state, api_auth))
+}
+
+pub async fn start_api_server(bind: IpAddr, port: u16, state: AppState) -> anyhow::Result<()> {
+    let (has_credentials, cors_origins) = {
+        let config = state.config.read().await;
+        let api = config.api.as_ref();
+        (
+            api.map(|a| a.api_key.is_some() || a.jwt_secret.is_some())
+                .unwrap_or(false),
+            api.and_then(|a| a.cors_origins.clone()).unwrap_or_else(|| {
+                vec![
+                    "http://localhost:3000".to_string(),
+                    "http://127.0.0.1:3000".to_string(),
+                ]
+            }),
+        )
+    };
+
+    // Fail closed: the management API is a global masking kill-switch. It may
+    // only be reachable beyond loopback when credentials are configured.
+    if !bind.is_loopback() && !has_credentials {
+        anyhow::bail!(
+            "refusing to bind the management API to non-loopback address {} without \
+             api.api_key or api.jwt_secret configured",
+            bind
+        );
+    }
+    if !has_credentials {
+        tracing::warn!(
+            "management API has no api_key/jwt_secret configured; it is unauthenticated \
+             and restricted to loopback ({bind})"
+        );
+    }
+
+    // Public routes (no auth required)
+    let public_routes = Router::new()
+        .route("/health", get(health_check))
+        .route("/metrics", get(get_metrics));
+
+    // Protected routes (require API key or JWT if configured)
+    let protected_routes = protected_router(state.clone());
+
+    // Explicit CORS allow-list: a permissive layer let any web page a
+    // browser on the network visits drive the management API cross-origin.
+    let allowed_origins: Vec<axum::http::HeaderValue> =
+        cors_origins.iter().filter_map(|o| o.parse().ok()).collect();
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::list(allowed_origins))
+        .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
+        .allow_headers([
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderName::from_static("x-api-key"),
+        ]);
 
     // Combine routes
     let app = Router::new()
         .merge(public_routes)
         .merge(protected_routes)
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let addr = SocketAddr::new(bind, port);
     tracing::info!("Management API listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to bind API server to {}: {}", addr, e))?;
-    axum::serve(listener, app)
-        .await
-        .map_err(|e| anyhow::anyhow!("API server error: {}", e))?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("API server error: {}", e))?;
     Ok(())
 }
 
 async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
+    let checks_enabled = {
+        let config = state.config.read().await;
+        config
+            .health_check
+            .as_ref()
+            .map(|h| h.enabled)
+            .unwrap_or(true)
+    };
     let health_status = state.health_status.read().await;
     let active_connections = state.active_connections.load(Ordering::Relaxed);
     let protocol = match state.db_protocol {
@@ -230,17 +312,27 @@ async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
         DbProtocol::MySql => "mysql",
     };
 
+    // "unknown" when checks are off, "starting" until the first probe lands.
+    // Upstream host/port and raw error text are deliberately not exposed on
+    // this public route (topology / credential-probing oracle).
+    let (status, code) = if !checks_enabled {
+        ("unknown", StatusCode::OK)
+    } else if health_status.last_check.is_none() {
+        ("starting", StatusCode::SERVICE_UNAVAILABLE)
+    } else if health_status.healthy {
+        ("ok", StatusCode::OK)
+    } else {
+        ("degraded", StatusCode::SERVICE_UNAVAILABLE)
+    };
+
     let response = json!({
-        "status": if health_status.healthy { "ok" } else { "degraded" },
+        "status": status,
         "service": "ironveil",
         "version": env!("CARGO_PKG_VERSION"),
         "upstream": {
-            "host": state.upstream_host.as_ref(),
-            "port": state.upstream_port,
             "protocol": protocol,
             "healthy": health_status.healthy,
             "last_check": health_status.last_check,
-            "last_error": health_status.last_error,
             "latency_ms": health_status.latency_ms,
             "consecutive_failures": health_status.consecutive_failures,
             "consecutive_successes": health_status.consecutive_successes
@@ -250,11 +342,7 @@ async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
         }
     });
 
-    if health_status.healthy {
-        (StatusCode::OK, Json(response))
-    } else {
-        (StatusCode::SERVICE_UNAVAILABLE, Json(response))
-    }
+    (code, Json(response))
 }
 
 async fn get_rules(State(state): State<AppState>) -> Json<Value> {
@@ -312,26 +400,55 @@ fn upsert_rule(rules: &mut Vec<MaskingRule>, incoming: MaskingRule) -> RuleMutat
     }
 }
 
+/// Lowercase/trim rule identifiers at ingest so matching is consistent with
+/// the wire-side normalization on both protocols.
+fn normalize_rule(rule: &mut MaskingRule) {
+    rule.column = rule.column.trim().to_ascii_lowercase();
+    rule.table = rule
+        .table
+        .as_ref()
+        .map(|t| t.trim().to_ascii_lowercase())
+        .filter(|t| !t.is_empty());
+}
+
+fn invalid_strategy_response(strategy: &str) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "status": "error",
+            "error": format!(
+                "unknown masking strategy '{}' (known: {})",
+                strategy,
+                crate::config::KNOWN_STRATEGIES.join(", ")
+            )
+        })),
+    )
+}
+
 async fn add_rule(
     State(state): State<AppState>,
-    Json(rule): Json<MaskingRule>,
+    Json(mut rule): Json<MaskingRule>,
 ) -> impl IntoResponse {
-    let mut config = state.config.write().await;
-    let rule_json = serde_json::to_value(&rule).unwrap_or_default();
-    let deduplicated_existing = dedupe_rules(&mut config.rules);
-    let result = upsert_rule(&mut config.rules, rule);
-    let rules_count = config.rules.len();
-    drop(config);
+    if !crate::config::KNOWN_STRATEGIES.contains(&rule.strategy.as_str()) {
+        return invalid_strategy_response(&rule.strategy);
+    }
+    normalize_rule(&mut rule);
 
-    // Persist to file
-    if let Err(e) = state.save_config().await {
+    // Mutate a clone and only swap it in after persistence succeeds, so a
+    // failed write can never leave live state diverged from disk.
+    let mut new_config = state.config.read().await.clone();
+    let rule_json = serde_json::to_value(&rule).unwrap_or_default();
+    let deduplicated_existing = dedupe_rules(&mut new_config.rules);
+    let result = upsert_rule(&mut new_config.rules, rule);
+    let rules_count = new_config.rules.len();
+
+    if let Err(e) = state.commit_config(new_config).await {
         tracing::error!("Failed to save config: {}", e);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
                 "status": "error",
                 "error": format!("Failed to persist rule: {}", e),
-                "rules_count": rules_count
             })),
         );
     }
@@ -357,14 +474,14 @@ async fn add_rule(
     )
 }
 
-/// Delete rule request payload
+/// Delete rule request payload. Rules are identified by (table, column) —
+/// positional indexes were racy: a concurrent mutation reordered the list and
+/// the confirmed delete removed a different masking rule.
 #[derive(Debug, Deserialize, Serialize)]
 struct DeleteRuleRequest {
-    /// Index of the rule to delete (0-based)
-    index: Option<usize>,
-    /// Or match by column name
-    column: Option<String>,
-    /// And optionally by table name
+    /// Column name of the rule to delete
+    column: String,
+    /// Optionally scope to a table name
     table: Option<String>,
 }
 
@@ -372,49 +489,36 @@ async fn delete_rule(
     State(state): State<AppState>,
     Json(req): Json<DeleteRuleRequest>,
 ) -> impl IntoResponse {
-    let mut config = state.config.write().await;
-
-    let original_len = config.rules.len();
     let delete_details = serde_json::to_value(&req).unwrap_or_default();
+    let column = req.column.trim().to_ascii_lowercase();
+    let table = req.table.as_ref().map(|t| t.trim().to_ascii_lowercase());
 
-    if let Some(index) = req.index {
-        if index >= config.rules.len() {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({
-                    "status": "error",
-                    "error": format!("Rule index {} out of bounds (have {} rules)", index, config.rules.len())
-                })),
-            );
+    let mut new_config = state.config.read().await.clone();
+    let original_len = new_config.rules.len();
+    new_config.rules.retain(|rule| {
+        let (rule_table, rule_column) = normalized_rule_key(rule);
+        if rule_column != column {
+            return true;
         }
-        config.rules.remove(index);
-    } else if let Some(ref column) = req.column {
-        config.rules.retain(|rule| {
-            if &rule.column != column {
-                return true;
-            }
-            if let Some(ref table) = req.table {
-                rule.table.as_ref() != Some(table)
-            } else {
-                false
-            }
-        });
-    } else {
+        match &table {
+            Some(table) => rule_table.as_ref() != Some(table),
+            None => false,
+        }
+    });
+
+    let deleted_count = original_len - new_config.rules.len();
+    let rules_count = new_config.rules.len();
+    if deleted_count == 0 {
         return (
-            StatusCode::BAD_REQUEST,
+            StatusCode::NOT_FOUND,
             Json(json!({
                 "status": "error",
-                "error": "Must provide either 'index' or 'column' to identify rule to delete"
+                "error": "No rule matched the given table/column"
             })),
         );
     }
 
-    let deleted_count = original_len - config.rules.len();
-    let rules_count = config.rules.len();
-    drop(config);
-
-    // Persist to file
-    if let Err(e) = state.save_config().await {
+    if let Err(e) = state.commit_config(new_config).await {
         tracing::error!("Failed to save config: {}", e);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -468,24 +572,30 @@ async fn import_rules(
     State(state): State<AppState>,
     Json(rules): Json<Vec<MaskingRule>>,
 ) -> impl IntoResponse {
-    let mut config = state.config.write().await;
+    if let Some(bad) = rules
+        .iter()
+        .find(|r| !crate::config::KNOWN_STRATEGIES.contains(&r.strategy.as_str()))
+    {
+        return invalid_strategy_response(&bad.strategy);
+    }
+
+    let mut new_config = state.config.read().await.clone();
     let imported_count = rules.len();
-    let deduplicated_existing = dedupe_rules(&mut config.rules);
+    let deduplicated_existing = dedupe_rules(&mut new_config.rules);
     let mut added = 0usize;
     let mut updated = 0usize;
     let mut unchanged = 0usize;
-    for rule in rules {
-        match upsert_rule(&mut config.rules, rule) {
+    for mut rule in rules {
+        normalize_rule(&mut rule);
+        match upsert_rule(&mut new_config.rules, rule) {
             RuleMutationOutcome::Added => added += 1,
             RuleMutationOutcome::Updated => updated += 1,
             RuleMutationOutcome::Unchanged => unchanged += 1,
         }
     }
-    let total_count = config.rules.len();
-    drop(config);
+    let total_count = new_config.rules.len();
 
-    // Persist to file
-    if let Err(e) = state.save_config().await {
+    if let Err(e) = state.commit_config(new_config).await {
         tracing::error!("Failed to save config: {}", e);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -528,12 +638,12 @@ async fn update_config(
     State(state): State<AppState>,
     Json(payload): Json<Value>,
 ) -> impl IntoResponse {
-    let mut config = state.config.write().await;
+    let mut new_config = state.config.read().await.clone();
     let mut changes = serde_json::Map::new();
 
     if let Some(enabled) = payload.get("masking_enabled").and_then(|v| v.as_bool()) {
-        let old_value = config.masking_enabled;
-        config.masking_enabled = enabled;
+        let old_value = new_config.masking_enabled;
+        new_config.masking_enabled = enabled;
         changes.insert(
             "masking_enabled".to_string(),
             json!({
@@ -542,16 +652,10 @@ async fn update_config(
             }),
         );
     }
-    drop(config);
 
-    // Log audit event if there were changes
+    // Persist first; only report (and audit) a change that actually took.
     if !changes.is_empty() {
-        state
-            .audit_logger
-            .log(AuditLogger::config_change(Value::Object(changes)))
-            .await;
-
-        if let Err(e) = state.save_config().await {
+        if let Err(e) = state.commit_config(new_config).await {
             tracing::error!("Failed to persist config: {}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -561,6 +665,11 @@ async fn update_config(
                 })),
             );
         }
+
+        state
+            .audit_logger
+            .log(AuditLogger::config_change(Value::Object(changes)))
+            .await;
     }
 
     let config = state.config.read().await;
@@ -598,6 +707,10 @@ async fn reload_config(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
+/// Upper bound on a scan/schema request before it is cancelled: an unbounded
+/// scan pins both the axum task and the upstream database.
+const SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 async fn scan_database(
     State(state): State<AppState>,
     Json(config): Json<ScanConfig>,
@@ -608,7 +721,21 @@ async fn scan_database(
         state.db_protocol,
     );
 
-    match scanner.scan(&config).await {
+    let result = match tokio::time::timeout(SCAN_TIMEOUT, scanner.scan(&config)).await {
+        Ok(result) => result,
+        Err(_) => {
+            return (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(json!({
+                    "status": "error",
+                    "error": "scan timed out",
+                    "code": "scan_timeout"
+                })),
+            );
+        }
+    };
+
+    match result {
         Ok(result) => {
             // Log audit event
             state
@@ -681,7 +808,21 @@ async fn get_schema(
         state.db_protocol,
     );
 
-    match scanner.get_schema(&config).await {
+    let result = match tokio::time::timeout(SCAN_TIMEOUT, scanner.get_schema(&config)).await {
+        Ok(result) => result,
+        Err(_) => {
+            return (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(json!({
+                    "status": "error",
+                    "error": "schema query timed out",
+                    "code": "scan_timeout"
+                })),
+            );
+        }
+    };
+
+    match result {
         Ok(schema) => {
             // Log audit event
             state
@@ -715,22 +856,30 @@ fn scan_error_response(error: ScanError) -> (StatusCode, Json<Value>) {
                 "code": "auth_required"
             })),
         ),
-        ScanError::ConnectionFailed(message) => (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({
-                "status": "error",
-                "error": message,
-                "code": "connection_failed"
-            })),
-        ),
-        ScanError::QueryFailed(message) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "status": "error",
-                "error": message,
-                "code": "query_failed"
-            })),
-        ),
+        // Raw driver errors carry SQLSTATE, role and database names — a
+        // credential-probing oracle. Log the detail; return a stable code.
+        ScanError::ConnectionFailed(message) => {
+            tracing::warn!(error = %message, "database scan connection failed");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({
+                    "status": "error",
+                    "error": "could not connect to the upstream database (see server logs)",
+                    "code": "connection_failed"
+                })),
+            )
+        }
+        ScanError::QueryFailed(message) => {
+            tracing::warn!(error = %message, "database scan query failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "error": "scan query failed (see server logs)",
+                    "code": "query_failed"
+                })),
+            )
+        }
     }
 }
 
@@ -770,7 +919,6 @@ async fn get_audit_logs(
             "config_reload" => Some(AuditEventType::ConfigReload),
             "database_scan" => Some(AuditEventType::DatabaseScan),
             "schema_query" => Some(AuditEventType::SchemaQuery),
-            "api_access" => Some(AuditEventType::ApiAccess),
             _ => None,
         };
         if let Some(e) = event {
@@ -839,7 +987,19 @@ mod tests {
         let response = health_check(State(state)).await;
         let (status, _json) = response.into_response().into_parts();
 
-        // For default state (healthy), we should get 200 OK
+        // Health is unknown until the first successful probe: readiness
+        // gates must not pass against an unprobed upstream.
+        assert_eq!(status.status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn test_health_check_ok_after_successful_probe() {
+        let config = AppConfig::default();
+        let state = AppState::new_for_test(config, "proxy.yaml".to_string());
+        state.update_health_status(true, Some(3), None).await;
+
+        let response = health_check(State(state)).await;
+        let (status, _json) = response.into_response().into_parts();
         assert_eq!(status.status, StatusCode::OK);
     }
 
@@ -854,6 +1014,7 @@ mod tests {
             DbProtocol::MySql,
         );
 
+        state.update_health_status(true, Some(3), None).await;
         let response = health_check(State(state)).await.into_response();
         let (parts, body) = response.into_parts();
         assert_eq!(parts.status, StatusCode::OK);
@@ -861,9 +1022,11 @@ mod tests {
         let bytes = to_bytes(body, usize::MAX).await.unwrap();
         let payload: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert_eq!(payload["upstream"]["host"], "db.internal");
-        assert_eq!(payload["upstream"]["port"], 6432);
+        // Topology (host/port) is deliberately absent from the public route
+        assert!(payload["upstream"].get("host").is_none());
+        assert!(payload["upstream"].get("port").is_none());
         assert_eq!(payload["upstream"]["protocol"], "mysql");
+        assert_eq!(payload["upstream"]["healthy"], true);
     }
 
     #[tokio::test]
@@ -873,6 +1036,8 @@ mod tests {
             api: Some(ApiConfig {
                 api_key: Some("my-secret-key".to_string()),
                 jwt_secret: None,
+                bind: None,
+                cors_origins: None,
             }),
             ..Default::default()
         };
@@ -974,6 +1139,8 @@ mod tests {
             api: Some(ApiConfig {
                 api_key: None,
                 jwt_secret: Some("my-jwt-secret".to_string()),
+                bind: None,
+                cors_origins: None,
             }),
             ..Default::default()
         };
@@ -997,13 +1164,7 @@ mod tests {
                 column: "email".to_string(),
                 strategy: "email".to_string(),
             }],
-            tls: None,
-            upstream_tls: false,
-            telemetry: None,
-            api: None,
-            limits: None,
-            health_check: None,
-            audit: None,
+            ..Default::default()
         };
         let state = AppState::new_for_test(config, "proxy.yaml".to_string());
 
@@ -1027,13 +1188,7 @@ mod tests {
         let config = AppConfig {
             masking_enabled: true,
             rules: vec![],
-            tls: None,
-            upstream_tls: false,
-            telemetry: None,
-            api: None,
-            limits: None,
-            health_check: None,
-            audit: None,
+            ..Default::default()
         };
         let state = AppState::new_for_test(config, config_path);
 
@@ -1061,13 +1216,7 @@ mod tests {
         let config = AppConfig {
             masking_enabled: true,
             rules: vec![],
-            tls: None,
-            upstream_tls: false,
-            telemetry: None,
-            api: None,
-            limits: None,
-            health_check: None,
-            audit: None,
+            ..Default::default()
         };
         let state = AppState::new_for_test(config, config_path);
 
@@ -1211,13 +1360,7 @@ mod tests {
                 column: "email".to_string(),
                 strategy: "email".to_string(),
             }],
-            tls: None,
-            upstream_tls: false,
-            telemetry: None,
-            api: None,
-            limits: None,
-            health_check: None,
-            audit: None,
+            ..Default::default()
         };
         let state = AppState::new_for_test(config, "proxy.yaml".to_string());
 
@@ -1262,8 +1405,7 @@ mod tests {
 
         let state = AppState::new_for_test(config, config_path);
         let request = DeleteRuleRequest {
-            index: None,
-            column: Some("email".to_string()),
+            column: "email".to_string(),
             table: Some("users".to_string()),
         };
 
@@ -1332,13 +1474,7 @@ mod tests {
         let config = AppConfig {
             masking_enabled: true,
             rules: vec![],
-            tls: None,
-            upstream_tls: false,
-            telemetry: None,
-            api: None,
-            limits: None,
-            health_check: None,
-            audit: None,
+            ..Default::default()
         };
         let state = AppState::new_for_test(config, "proxy.yaml".to_string());
 
@@ -1457,5 +1593,167 @@ mod tests {
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ------------------------------------------------------------------
+    // api_auth middleware. These drive the real protected router through
+    // tower::ServiceExt::oneshot; calling handlers directly (as the rest of
+    // this module does) bypasses authorization entirely, which is why the
+    // highest-consequence path in the product had no coverage.
+    // ------------------------------------------------------------------
+
+    fn auth_test_state(api: Option<ApiConfig>) -> AppState {
+        AppState::new_for_test(
+            AppConfig {
+                api,
+                ..Default::default()
+            },
+            "proxy.yaml".to_string(),
+        )
+    }
+
+    async fn auth_request(state: AppState, headers: Vec<(&str, String)>) -> StatusCode {
+        use tower::ServiceExt;
+
+        let app = protected_router(state.clone()).with_state(state);
+        let mut builder = Request::builder().uri("/rules").method("GET");
+        for (name, value) in headers {
+            builder = builder.header(name, value);
+        }
+        let mut request = builder.body(Body::empty()).unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 50000))));
+
+        app.oneshot(request).await.unwrap().status()
+    }
+
+    fn jwt_for(secret: &str, expires_in_secs: i64) -> String {
+        use jsonwebtoken::{EncodingKey, Header, encode};
+        let now = chrono::Utc::now().timestamp();
+        let claims = Claims {
+            sub: "tester".to_string(),
+            exp: (now + expires_in_secs) as usize,
+            iat: now as usize,
+        };
+        encode(
+            &Header::default(),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_api_auth_rejects_missing_credentials() {
+        let state = auth_test_state(Some(ApiConfig {
+            api_key: Some("secret".to_string()),
+            jwt_secret: None,
+            bind: None,
+            cors_origins: None,
+        }));
+        assert_eq!(
+            auth_request(state, vec![]).await,
+            StatusCode::UNAUTHORIZED,
+            "a configured API must reject unauthenticated requests"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_api_auth_rejects_wrong_api_key() {
+        let state = auth_test_state(Some(ApiConfig {
+            api_key: Some("secret".to_string()),
+            jwt_secret: None,
+            bind: None,
+            cors_origins: None,
+        }));
+        assert_eq!(
+            auth_request(state, vec![("X-API-Key", "wrong".to_string())]).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn test_api_auth_accepts_correct_api_key() {
+        let state = auth_test_state(Some(ApiConfig {
+            api_key: Some("secret".to_string()),
+            jwt_secret: None,
+            bind: None,
+            cors_origins: None,
+        }));
+        assert_eq!(
+            auth_request(state, vec![("X-API-Key", "secret".to_string())]).await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn test_api_auth_rejects_bearer_when_only_api_key_configured() {
+        let state = auth_test_state(Some(ApiConfig {
+            api_key: Some("secret".to_string()),
+            jwt_secret: None,
+            bind: None,
+            cors_origins: None,
+        }));
+        assert_eq!(
+            auth_request(
+                state,
+                vec![("Authorization", "Bearer anything".to_string())]
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn test_api_auth_accepts_valid_jwt_and_rejects_expired() {
+        let state = auth_test_state(Some(ApiConfig {
+            api_key: None,
+            jwt_secret: Some("jwt-secret".to_string()),
+            bind: None,
+            cors_origins: None,
+        }));
+
+        let valid = jwt_for("jwt-secret", 3600);
+        assert_eq!(
+            auth_request(
+                state.clone(),
+                vec![("Authorization", format!("Bearer {valid}"))]
+            )
+            .await,
+            StatusCode::OK
+        );
+
+        let expired = jwt_for("jwt-secret", -3600);
+        assert_eq!(
+            auth_request(state, vec![("Authorization", format!("Bearer {expired}"))]).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn test_api_auth_allows_when_no_credentials_configured() {
+        // Locks in the intended behaviour of the no-credentials branch. It is
+        // only reachable because start_api_server refuses to bind anything but
+        // loopback in that configuration (see the test below).
+        let state = auth_test_state(None);
+        assert_eq!(auth_request(state, vec![]).await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_start_api_server_refuses_public_bind_without_credentials() {
+        let state = auth_test_state(None);
+        let result = start_api_server(IpAddr::from([0, 0, 0, 0]), 0, state).await;
+        let err = result.expect_err("binding 0.0.0.0 without credentials must fail");
+        assert!(
+            err.to_string().contains("non-loopback"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_add_rule_rejects_unknown_strategy() {
+        let (status, _) = invalid_strategy_response("emial");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }

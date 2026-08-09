@@ -1,7 +1,8 @@
 "use client"
 
-import { useState, useEffect } from "react"
-import { Shield, Plus, Trash2, Save, Loader2, FlaskConical, TestTube, Eye, CheckCircle, XCircle } from "lucide-react"
+import { useState } from "react"
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
+import { Shield, Plus, Trash2, Save, Loader2, FlaskConical, TestTube, Eye, CheckCircle, XCircle, AlertTriangle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { RuleTestDialog } from "@/components/rule-test-dialog"
@@ -17,6 +18,8 @@ import { Input } from "@/components/ui/input"
 import { Select } from "@/components/ui/select"
 import { motion, AnimatePresence } from "framer-motion"
 import { apiFetchJson } from "@/lib/api"
+import { errorMessage, pollingInterval, retryPolicy } from "@/lib/query"
+import { STRATEGIES, PREVIEW_DISCLAIMER, previewMask, sampleValue } from "@/lib/masking-preview"
 
 interface MaskingRule {
   table: string | null
@@ -24,52 +27,19 @@ interface MaskingRule {
   strategy: string
 }
 
-interface ConfigResponse {
+interface RulesResponse {
   rules: MaskingRule[]
 }
 
-// Quick test preview function
-const quickPreview = (value: string, strategy: string): string => {
-  switch (strategy) {
-    case "email": {
-      const parts = value.split("@")
-      if (parts.length !== 2) return "***@***.***"
-      return `${parts[0][0]}***@${parts[1].split(".")[0].replace(/./g, "*")}.${parts[1].split(".").slice(1).join(".")}`
-    }
-    case "phone": {
-      const digits = value.replace(/\D/g, "")
-      return `***-***-${digits.slice(-4) || "****"}`
-    }
-    case "credit_card": {
-      const digits = value.replace(/\D/g, "")
-      return `****-****-****-${digits.slice(-4) || "****"}`
-    }
-    case "address": return "*** Masked Address ***"
-    case "hash": return `sha256:${value.split("").reduce((a, c) => a + c.charCodeAt(0), 0).toString(16).padStart(8, "0")}...`
-    case "json": return '{"***": "***"}'
-    default: return "***"
-  }
-}
-
-// Sample values for strategies
-const sampleValues: Record<string, string> = {
-  email: "john.doe@company.com",
-  phone: "+1 (555) 123-4567",
-  credit_card: "4532-1234-5678-9012",
-  address: "123 Main St, New York, NY 10001",
-  hash: "sensitive-data-12345",
-  json: '{"ssn": "123-45-6789", "dob": "1990-01-15"}',
-}
-
 export default function RulesPage() {
-  const [rules, setRules] = useState<MaskingRule[]>([])
-  const [isLoading, setIsLoading] = useState(true)
+  const queryClient = useQueryClient()
   const [isAdding, setIsAdding] = useState(false)
   const [showTestDialog, setShowTestDialog] = useState(false)
   const [quickTestRule, setQuickTestRule] = useState<MaskingRule | null>(null)
   const [showQuickPreview, setShowQuickPreview] = useState(false)
   const [deleteConfirm, setDeleteConfirm] = useState<number | null>(null)
-  
+  const [mutationError, setMutationError] = useState<string | null>(null)
+
   // New rule state
   const [newRule, setNewRule] = useState<MaskingRule>({
     table: "",
@@ -77,75 +47,84 @@ export default function RulesPage() {
     strategy: "hash"
   })
 
-  const fetchRules = async () => {
-    try {
-      const data = await apiFetchJson<ConfigResponse>("/rules")
-      setRules(data.rules)
-    } catch (error) {
-      console.error("Failed to fetch rules:", error)
-    } finally {
-      setIsLoading(false)
-    }
+  const {
+    data: rulesData,
+    isLoading,
+    isError,
+    error: rulesError,
+    refetch,
+  } = useQuery<RulesResponse>({
+    queryKey: ["rules"],
+    queryFn: () => apiFetchJson<RulesResponse>("/rules"),
+    refetchInterval: pollingInterval(15000),
+    refetchIntervalInBackground: false,
+    retry: retryPolicy,
+  })
+
+  const rules = rulesData?.rules ?? []
+
+  const invalidateRuleQueries = () => {
+    queryClient.invalidateQueries({ queryKey: ["rules"] })
+    queryClient.invalidateQueries({ queryKey: ["config"] })
   }
 
-  useEffect(() => {
-    fetchRules()
-  }, [])
-
-  const handleAddRule = async () => {
-    try {
-      const ruleToSend = {
-        ...newRule,
-        table: newRule.table === "" ? null : newRule.table
-      }
-
-      await apiFetchJson<Record<string, unknown>>("/rules", {
+  const addRuleMutation = useMutation({
+    mutationFn: (rule: MaskingRule) =>
+      apiFetchJson<Record<string, unknown>>("/rules", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(ruleToSend)
+        body: JSON.stringify(rule),
+      }),
+    onSettled: invalidateRuleQueries,
+  })
+
+  const deleteRuleMutation = useMutation({
+    mutationFn: (rule: MaskingRule) =>
+      apiFetchJson<Record<string, unknown>>("/rules/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        // Delete by identity, never by array index: the list may have changed
+        // on the server since it was fetched.
+        body: JSON.stringify({
+          table: rule.table,
+          column: rule.column,
+        }),
+      }),
+    onSettled: invalidateRuleQueries,
+  })
+
+  const handleAddRule = async () => {
+    setMutationError(null)
+    try {
+      await addRuleMutation.mutateAsync({
+        ...newRule,
+        table: newRule.table === "" ? null : newRule.table,
       })
-      
       setIsAdding(false)
       setNewRule({ table: "", column: "", strategy: "hash" })
-      fetchRules()
     } catch (error) {
-      console.error("Failed to add rule:", error)
+      setMutationError(errorMessage(error, "Failed to add rule."))
     }
   }
 
   const handleSaveFromTest = async (rule: { table: string; column: string; strategy: string }) => {
-    try {
-      await apiFetchJson<Record<string, unknown>>("/rules", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          table: rule.table || null,
-          column: rule.column,
-          strategy: rule.strategy
-        })
-      })
-      fetchRules()
-    } catch (error) {
-      console.error("Failed to add rule:", error)
-    }
+    // Errors propagate to the dialog, which stays open and shows them.
+    await addRuleMutation.mutateAsync({
+      table: rule.table || null,
+      column: rule.column,
+      strategy: rule.strategy,
+    })
   }
 
-  const handleDeleteRule = async (idx: number) => {
-    const rule = rules[idx]
+  const handleDeleteRule = async (rule: MaskingRule) => {
+    setMutationError(null)
     try {
-      await apiFetchJson<Record<string, unknown>>("/rules/delete", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          column: rule.column,
-          index: idx
-        })
-      })
-      fetchRules()
+      await deleteRuleMutation.mutateAsync(rule)
     } catch (error) {
-      console.error("Failed to delete rule:", error)
+      setMutationError(errorMessage(error, "Failed to delete rule."))
+    } finally {
+      setDeleteConfirm(null)
     }
-    setDeleteConfirm(null)
   }
 
   const strategyColors: Record<string, string> = {
@@ -153,6 +132,10 @@ export default function RulesPage() {
     phone: "bg-green-500/10 text-green-400",
     credit_card: "bg-amber-500/10 text-amber-400",
     address: "bg-purple-500/10 text-purple-400",
+    ssn: "bg-red-500/10 text-red-400",
+    ip: "bg-sky-500/10 text-sky-400",
+    dob: "bg-pink-500/10 text-pink-400",
+    passport: "bg-violet-500/10 text-violet-400",
     hash: "bg-gray-500/10 text-gray-400",
     json: "bg-cyan-500/10 text-cyan-400",
   }
@@ -184,6 +167,23 @@ export default function RulesPage() {
         </div>
       </div>
 
+      {isError && (
+        <div className="rounded-lg border border-red-700/40 bg-red-900/20 px-4 py-3 text-red-300 flex items-center justify-between gap-4" role="alert">
+          <span>
+            Failed to load masking rules: {errorMessage(rulesError, "the management API is unreachable.")}
+          </span>
+          <Button variant="outline" size="sm" onClick={() => refetch()}>
+            Retry
+          </Button>
+        </div>
+      )}
+
+      {mutationError && (
+        <div className="rounded-lg border border-red-700/40 bg-red-900/20 px-4 py-3 text-red-300" role="alert">
+          {mutationError}
+        </div>
+      )}
+
       {/* Rule Test Dialog */}
       <RuleTestDialog
         open={showTestDialog}
@@ -203,10 +203,10 @@ export default function RulesPage() {
               Quick Preview: {quickTestRule?.column}
             </DialogTitle>
             <DialogDescription>
-              See how this rule masks sample data
+              {PREVIEW_DISCLAIMER}
             </DialogDescription>
           </DialogHeader>
-          
+
           {quickTestRule && (
             <div className="space-y-4 py-4">
               <div className="bg-gray-800/50 rounded-lg p-4 space-y-3">
@@ -216,24 +216,24 @@ export default function RulesPage() {
                     {quickTestRule.strategy}
                   </Badge>
                 </div>
-                
+
                 <div className="pt-3 border-t border-gray-700">
                   <div className="text-xs text-gray-500 mb-2">Sample Input</div>
                   <code className="bg-red-500/10 text-red-400 px-3 py-2 rounded-lg block font-mono text-sm">
-                    {sampleValues[quickTestRule.strategy] || "sample-data"}
+                    {sampleValue(quickTestRule.strategy)}
                   </code>
                 </div>
-                
+
                 <div>
-                  <div className="text-xs text-gray-500 mb-2">Masked Output</div>
+                  <div className="text-xs text-gray-500 mb-2">Masked Output (example)</div>
                   <code className="bg-emerald-500/10 text-emerald-400 px-3 py-2 rounded-lg block font-mono text-sm">
-                    {quickPreview(sampleValues[quickTestRule.strategy] || "sample-data", quickTestRule.strategy)}
+                    {previewMask(quickTestRule.strategy)}
                   </code>
                 </div>
               </div>
             </div>
           )}
-          
+
           <DialogFooter>
             <Button variant="outline" onClick={() => setShowQuickPreview(false)}>
               Close
@@ -275,40 +275,48 @@ export default function RulesPage() {
                   value={newRule.strategy}
                   onChange={(e) => setNewRule({ ...newRule, strategy: e.target.value })}
                 >
-                  <option value="hash">Hash (Deterministic)</option>
-                  <option value="email">Fake Email</option>
-                  <option value="phone">Fake Phone</option>
-                  <option value="credit_card">Fake Credit Card</option>
-                  <option value="address">Fake Address</option>
-                  <option value="json">JSON Masking</option>
+                  {STRATEGIES.map((s) => (
+                    <option key={s.value} value={s.value}>
+                      {s.label}
+                    </option>
+                  ))}
                 </Select>
               </div>
             </div>
-            
-            {/* Live Preview */}
+
+            {/* Illustrative Preview */}
             {newRule.column && (
               <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 className="mb-4 p-3 bg-gray-800/50 rounded-lg"
               >
-                <div className="text-xs text-gray-500 mb-2">Live Preview</div>
+                <div className="text-xs text-gray-500 mb-2">Example Output</div>
                 <div className="flex items-center gap-3 text-sm">
-                  <code className="text-gray-400">{sampleValues[newRule.strategy] || "sample"}</code>
+                  <code className="text-gray-400">{sampleValue(newRule.strategy)}</code>
                   <span className="text-gray-600">→</span>
                   <code className="text-emerald-400">
-                    {quickPreview(sampleValues[newRule.strategy] || "sample", newRule.strategy)}
+                    {previewMask(newRule.strategy)}
                   </code>
                 </div>
+                <p className="text-xs text-gray-500 mt-2">{PREVIEW_DISCLAIMER}</p>
               </motion.div>
             )}
-            
+
             <div className="flex justify-end space-x-3">
               <Button variant="ghost" onClick={() => setIsAdding(false)}>
                 Cancel
               </Button>
-              <Button variant="success" onClick={handleAddRule} disabled={!newRule.column}>
-                <Save className="w-4 h-4 mr-2" />
+              <Button
+                variant="success"
+                onClick={handleAddRule}
+                disabled={!newRule.column || addRuleMutation.isPending}
+              >
+                {addRuleMutation.isPending ? (
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                ) : (
+                  <Save className="w-4 h-4 mr-2" />
+                )}
                 Save Rule
               </Button>
             </div>
@@ -320,6 +328,14 @@ export default function RulesPage() {
       {isLoading ? (
         <div className="flex justify-center py-12">
           <Loader2 className="w-8 h-8 animate-spin text-indigo-500" />
+        </div>
+      ) : isError ? (
+        <div className="text-center py-12 bg-gray-900/50 rounded-xl border border-red-900/40 border-dashed">
+          <AlertTriangle className="w-12 h-12 text-red-500 mx-auto mb-4" />
+          <h3 className="text-xl font-semibold text-red-300">Rules Unavailable</h3>
+          <p className="text-gray-500 mt-2">
+            The rule list could not be loaded, so the state shown here may be incomplete.
+          </p>
         </div>
       ) : (
         <div className="grid gap-4">
@@ -340,8 +356,8 @@ export default function RulesPage() {
           ) : (
             <AnimatePresence>
               {rules.map((rule, idx) => (
-                <motion.div 
-                  key={`${rule.column}-${idx}`}
+                <motion.div
+                  key={`${rule.table ?? ""}-${rule.column}-${idx}`}
                   initial={{ opacity: 0, y: 20 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -20 }}
@@ -375,7 +391,7 @@ export default function RulesPage() {
                       </div>
                     </div>
                   </div>
-                  
+
                   <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
                     <Button
                       variant="ghost"
@@ -388,13 +404,14 @@ export default function RulesPage() {
                       <Eye className="w-4 h-4 mr-1" />
                       Preview
                     </Button>
-                    
+
                     {deleteConfirm === idx ? (
                       <div className="flex items-center gap-1">
                         <Button
                           variant="destructive"
                           size="sm"
-                          onClick={() => handleDeleteRule(idx)}
+                          disabled={deleteRuleMutation.isPending}
+                          onClick={() => handleDeleteRule(rule)}
                         >
                           <CheckCircle className="w-4 h-4" />
                         </Button>

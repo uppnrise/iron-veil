@@ -30,10 +30,15 @@ pub fn init_telemetry(config: Option<&TelemetryConfig>) -> Result<Option<Telemet
                 .with_endpoint(&cfg.otlp_endpoint)
                 .build()?;
 
-            // Build the tracer provider
+            // Build the tracer provider. Parent-based ratio sampling: an
+            // unconditional AlwaysOn exported a span per instrumented call and
+            // saturated the batch exporter under load.
+            let ratio = cfg.sample_ratio.unwrap_or(0.05).clamp(0.0, 1.0);
             let provider = SdkTracerProvider::builder()
                 .with_batch_exporter(exporter, runtime::Tokio)
-                .with_sampler(Sampler::AlwaysOn)
+                .with_sampler(Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(
+                    ratio,
+                ))))
                 .with_id_generator(RandomIdGenerator::default())
                 .with_resource(Resource::new(vec![
                     KeyValue::new("service.name", cfg.service_name.clone()),
@@ -91,16 +96,4 @@ impl Drop for TelemetryGuard {
             eprintln!("Error shutting down tracer provider: {:?}", e);
         }
     }
-}
-
-/// Creates a span for database proxy operations.
-/// Use this macro to instrument key code paths.
-#[macro_export]
-macro_rules! span_proxy {
-    ($name:expr) => {
-        tracing::info_span!("proxy", operation = $name)
-    };
-    ($name:expr, $($field:tt)*) => {
-        tracing::info_span!("proxy", operation = $name, $($field)*)
-    };
 }

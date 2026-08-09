@@ -47,6 +47,10 @@ pub struct ScanConfig {
     pub confidence_threshold: f64,
 }
 
+/// Server-side clamp on `sample_size`: an unbounded request value pulled
+/// entire tables into memory and pinned the upstream database.
+const MAX_SAMPLE_SIZE: usize = 1000;
+
 fn default_sample_size() -> usize {
     100
 }
@@ -287,25 +291,30 @@ impl DbScanner {
         })
     }
 
-    /// Connect to PostgreSQL database
+    /// Connect to PostgreSQL database.
+    /// Uses the Config builder (no keyword/value string interpolation, so a
+    /// password containing spaces or '=' cannot inject libpq parameters).
+    /// NOTE: this path is plaintext (NoTls); scanning assumes a trusted
+    /// network path to the upstream.
     async fn connect_postgres(&self, config: &ScanConfig) -> Result<Client, ScanError> {
-        let conn_str = format!(
-            "host={} port={} user={} password={} dbname={} sslmode=prefer connect_timeout=10",
-            self.host, self.port, config.username, config.password, config.database
-        );
-
         debug!(
             "Connecting to PostgreSQL: host={}, port={}, db={}",
             self.host, self.port, config.database
         );
 
-        let (client, connection) =
-            tokio_postgres::connect(&conn_str, NoTls)
-                .await
-                .map_err(|e| {
-                    warn!("PostgreSQL connection failed: {}", e);
-                    ScanError::ConnectionFailed(format!("{}", e))
-                })?;
+        let mut pg_config = tokio_postgres::Config::new();
+        pg_config
+            .host(&*self.host)
+            .port(self.port)
+            .user(&config.username)
+            .password(&config.password)
+            .dbname(&config.database)
+            .connect_timeout(std::time::Duration::from_secs(10));
+
+        let (client, connection) = pg_config.connect(NoTls).await.map_err(|e| {
+            warn!("PostgreSQL connection failed: {}", e);
+            ScanError::ConnectionFailed(format!("{}", e))
+        })?;
 
         // Spawn connection handler
         tokio::spawn(async move {
@@ -437,8 +446,15 @@ impl DbScanner {
         table: &str,
         limit: usize,
     ) -> Result<Vec<HashMap<String, Option<String>>>, ScanError> {
-        // Use TABLESAMPLE for large tables, or LIMIT for smaller ones
-        let query = format!(r#"SELECT * FROM "{}"."{}" LIMIT {}"#, schema, table, limit);
+        // Use TABLESAMPLE for large tables, or LIMIT for smaller ones.
+        // Identifiers cannot be bound parameters; escape embedded quotes so a
+        // hostile schema/table name cannot break out of the quoting.
+        let query = format!(
+            r#"SELECT * FROM "{}"."{}" LIMIT {}"#,
+            quote_ident(schema),
+            quote_ident(table),
+            limit.min(MAX_SAMPLE_SIZE)
+        );
 
         let rows = client.query(&query, &[]).await.map_err(|e| {
             ScanError::QueryFailed(format!("Failed to sample {}.{}: {}", schema, table, e))
@@ -587,7 +603,7 @@ impl DbScanner {
 
                 if let Some(pii_type) = self.pii_scanner.scan(trimmed) {
                     match_count += 1;
-                    *type_counts.entry(pii_type.clone()).or_insert(0) += 1;
+                    *type_counts.entry(pii_type).or_insert(0) += 1;
 
                     if sample_value.is_none() {
                         sample_value = Some(value.clone());
@@ -605,17 +621,33 @@ impl DbScanner {
         (match_count, detected_type, sample_value)
     }
 
-    /// Mask a sample value for display (don't expose full PII)
+    /// Mask a sample value for display (don't expose full PII).
+    /// Operates on characters — byte slicing panicked on multi-byte values.
     fn mask_sample(&self, value: &str) -> String {
-        let len = value.len();
-        if len <= 4 {
-            "*".repeat(len)
+        let len = value.chars().count();
+        let edge = if len <= 4 {
+            return "*".repeat(len);
         } else if len <= 8 {
-            format!("{}***{}", &value[..2], &value[len - 2..])
+            2
         } else {
-            format!("{}***{}", &value[..3], &value[len - 3..])
-        }
+            3
+        };
+        let head: String = value.chars().take(edge).collect();
+        let tail: String = value
+            .chars()
+            .rev()
+            .take(edge)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        format!("{}***{}", head, tail)
     }
+}
+
+/// Double embedded double quotes for use inside a quoted SQL identifier.
+fn quote_ident(ident: &str) -> String {
+    ident.replace('"', "\"\"")
 }
 
 #[cfg(test)]

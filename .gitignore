@@ -1,5 +1,8 @@
 /target
 
+# Release artifacts
+/dist/
+
 # macOS
 .DS_Store
 
@@ -12,6 +15,18 @@
 # Rust
 **/*.rs.bk
 
-# Certificates (generated locally)
-/certs/
+# Environment files (may contain secrets)
+.env
+.env.*
 
+# Certificates and key material (generated locally)
+/certs/
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Web build output and dependencies
+web/node_modules/
+web/.next/
+web/out/

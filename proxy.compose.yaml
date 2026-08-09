@@ -1,0 +1,54 @@
+# Compose-stack config (used by docker-compose.yml only).
+# Differs from proxy.yaml by exposing the management API on the published
+# container port so host-side CI and local dashboards can reach /health.
+# The demo API key is intentional and not for production use.
+
+masking_enabled: true
+
+rules:
+- table: users
+  column: email
+  strategy: email
+- table: users
+  column: phone_number
+  strategy: phone
+
+heuristics:
+  enabled: true
+  types: [email, phone, ssn]
+
+tls:
+  enabled: false
+  cert_path: certs/server.crt
+  key_path: certs/server.key
+upstream_tls: false
+telemetry:
+  enabled: false
+  otlp_endpoint: http://localhost:4317
+  service_name: iron-veil
+
+# Non-loopback bind requires credentials (enforced by the binary).
+api:
+  api_key: compose-dev-only-not-for-production
+  bind: "0.0.0.0"
+
+limits:
+  max_connections: 1000
+  upstream_pool_size: 100
+  upstream_pool_wait_timeout_secs: 5
+  connect_timeout_secs: 30
+  idle_timeout_secs: 300
+health_check:
+  enabled: true
+  interval_secs: 10
+  timeout_secs: 5
+  unhealthy_threshold: 3
+  healthy_threshold: 1
+audit:
+  enabled: true
+  log_to_stdout: true
+  log_file: null
+  rotation_enabled: true
+  max_file_size_bytes: 10485760
+  max_rotated_files: 5
+  events: []

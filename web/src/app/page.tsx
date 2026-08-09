@@ -4,14 +4,15 @@ import { useQuery } from "@tanstack/react-query"
 import { useMemo } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { StatsCard } from "@/components/stats-card"
-import { ConnectionsChart, MultiLineChart } from "@/components/charts"
+import { ConnectionsChart, MultiLineChart, QueryTypesChart } from "@/components/charts"
 import { MaskingStatsChart } from "@/components/charts"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Badge } from "@/components/ui/badge"
-import { apiFetchJson } from "@/lib/api"
-import { 
-  Activity, 
-  ShieldCheck, 
+import { apiFetchJson, fetchHealth, type HealthResponse } from "@/lib/api"
+import { errorMessage, pollingInterval, retryPolicy } from "@/lib/query"
+import {
+  Activity,
+  ShieldCheck,
   Database,
   Clock,
   Eye,
@@ -25,17 +26,7 @@ interface StatsResponse {
   active_connections: number
   total_connections: number
   masking: {
-    email: number
-    phone: number
-    address: number
-    credit_card: number
-    ssn: number
-    ip: number
-    dob: number
-    passport: number
-    hash: number
-    json: number
-    other: number
+    [strategy: string]: number
     total: number
   }
   queries: {
@@ -61,10 +52,6 @@ interface LogEntry {
   content: string
 }
 
-interface HealthResponse {
-  status?: string
-}
-
 interface RulesResponse {
   rules?: Array<unknown>
 }
@@ -74,61 +61,104 @@ interface LogsResponse {
 }
 
 export default function DashboardPage() {
-  const { data: health } = useQuery<HealthResponse>({
+  const {
+    data: health,
+    isError: isHealthError,
+    isLoading: isHealthLoading,
+  } = useQuery<HealthResponse>({
     queryKey: ["health"],
-    queryFn: () => apiFetchJson<HealthResponse>("/health"),
-    refetchInterval: 5000,
+    queryFn: fetchHealth,
+    refetchInterval: pollingInterval(5000),
+    refetchIntervalInBackground: false,
+    retry: retryPolicy,
   })
 
-  const { data: stats } = useQuery<StatsResponse>({
+  const {
+    data: stats,
+    isError: isStatsError,
+    error: statsError,
+  } = useQuery<StatsResponse>({
     queryKey: ["stats"],
     queryFn: () => apiFetchJson<StatsResponse>("/stats"),
-    refetchInterval: 2000,
+    // The server records history snapshots every 5s; polling faster only re-reads
+    // the same snapshot.
+    refetchInterval: pollingInterval(5000),
+    refetchIntervalInBackground: false,
+    retry: retryPolicy,
   })
 
   const { data: rules } = useQuery<RulesResponse>({
     queryKey: ["rules"],
     queryFn: () => apiFetchJson<RulesResponse>("/rules"),
+    retry: retryPolicy,
   })
 
   const { data: logs } = useQuery<LogsResponse>({
     queryKey: ["logs"],
     queryFn: () => apiFetchJson<LogsResponse>("/logs"),
-    refetchInterval: 3000,
+    refetchInterval: pollingInterval(5000),
+    refetchIntervalInBackground: false,
+    retry: retryPolicy,
   })
 
-  // Transform stats history into connection history format
+  // Transform stats history into chart-friendly points. The backend reports
+  // cumulative lifetime counters, so differentiate consecutive snapshots to get
+  // per-interval activity.
   const connectionHistory = useMemo(() => {
     if (!stats?.history) return []
-    return stats.history
-      .slice()
-      .reverse() // Backend returns newest first
-      .map((point) => ({
-        timestamp: new Date(point.timestamp).toLocaleTimeString('en-US', { 
-          hour: '2-digit', 
+    const chronological = stats.history.slice().reverse() // Backend returns newest first
+    return chronological.map((point, idx) => {
+      const previous = idx > 0 ? chronological[idx - 1] : undefined
+      const queriesDelta = previous
+        ? Math.max(0, point.total_queries - previous.total_queries)
+        : 0
+      const maskedDelta = previous
+        ? Math.max(0, point.total_masked - previous.total_masked)
+        : 0
+      return {
+        timestamp: new Date(point.timestamp).toLocaleTimeString('en-US', {
+          hour: '2-digit',
           minute: '2-digit',
           second: '2-digit',
-          hour12: false 
+          hour12: false
         }),
         value: point.active_connections,
-        queries: point.total_queries,
-        masked: point.total_masked,
-      }))
+        queries: queriesDelta,
+        masked: maskedDelta,
+      }
+    }).slice(1) // First point has no predecessor, so its delta is unknown
   }, [stats])
 
-  // Build masking stats from real data
-  const maskingStats = stats ? [
-    { strategy: "email", count: stats.masking.email },
-    { strategy: "phone", count: stats.masking.phone },
-    { strategy: "address", count: stats.masking.address },
-    { strategy: "credit_card", count: stats.masking.credit_card },
-    { strategy: "ssn", count: stats.masking.ssn },
-    { strategy: "hash", count: stats.masking.hash },
-    { strategy: "json", count: stats.masking.json },
-    { strategy: "other", count: stats.masking.other },
-  ].filter(s => s.count > 0) : []
+  // Build masking stats from every strategy counter the backend reports
+  const maskingTotal = stats?.masking?.total ?? 0
+  const maskingStats = stats
+    ? Object.entries(stats.masking)
+        .filter(([strategy]) => strategy !== "total")
+        .map(([strategy, count]) => ({ strategy, count }))
+        .filter((s) => s.count > 0)
+    : []
+
+  const queryTypeData = stats
+    ? [
+        { name: "SELECT", value: stats.queries.select },
+        { name: "INSERT", value: stats.queries.insert },
+        { name: "UPDATE", value: stats.queries.update },
+        { name: "DELETE", value: stats.queries.delete },
+        { name: "OTHER", value: stats.queries.other },
+      ].filter((entry) => entry.value > 0)
+    : []
 
   const recentLogs = logs?.logs?.slice(0, 5) || []
+
+  const healthState = isHealthLoading
+    ? { label: "Checking...", dot: "bg-yellow-400", dotSolid: "bg-yellow-500", text: "text-yellow-500" }
+    : isHealthError
+      ? { label: "API Unreachable", dot: "bg-red-400", dotSolid: "bg-red-500", text: "text-red-500" }
+      : health?.status === "ok"
+        ? { label: "System Operational", dot: "bg-emerald-400", dotSolid: "bg-emerald-500", text: "text-emerald-500" }
+        : health?.status === "degraded"
+          ? { label: "Degraded", dot: "bg-yellow-400", dotSolid: "bg-yellow-500", text: "text-yellow-500" }
+          : { label: "Status Unknown", dot: "bg-gray-400", dotSolid: "bg-gray-500", text: "text-gray-400" }
 
   return (
     <div className="p-8 space-y-8 min-h-screen">
@@ -139,25 +169,32 @@ export default function DashboardPage() {
           <p className="text-gray-400 mt-1">Real-time monitoring for IronVeil proxy</p>
         </div>
         <div className="flex items-center gap-4">
-          <motion.div 
+          <motion.div
             className="flex items-center gap-2 px-3 py-1.5 bg-gray-900 rounded-lg border border-gray-800"
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
           >
             <RefreshCw className="h-3 w-3 text-gray-400 animate-spin" style={{ animationDuration: '3s' }} />
-            <span className="text-xs text-gray-400">Auto-refresh: 2s</span>
+            <span className="text-xs text-gray-400">Auto-refresh: 5s</span>
           </motion.div>
           <div className="flex items-center space-x-2">
             <span className="relative flex h-3 w-3">
-              <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${health?.status === 'ok' ? 'bg-emerald-400' : 'bg-yellow-400'} opacity-75`}></span>
-              <span className={`relative inline-flex rounded-full h-3 w-3 ${health?.status === 'ok' ? 'bg-emerald-500' : 'bg-yellow-500'}`}></span>
+              <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${healthState.dot} opacity-75`}></span>
+              <span className={`relative inline-flex rounded-full h-3 w-3 ${healthState.dotSolid}`}></span>
             </span>
-            <span className={`text-sm ${health?.status === 'ok' ? 'text-emerald-500' : 'text-yellow-500'} font-medium`}>
-              {health?.status === 'ok' ? 'System Operational' : health?.status === 'degraded' ? 'Degraded' : 'Checking...'}
+            <span className={`text-sm ${healthState.text} font-medium`}>
+              {healthState.label}
             </span>
           </div>
         </div>
       </div>
+
+      {isStatsError && (
+        <div className="rounded-lg border border-red-700/40 bg-red-900/20 px-4 py-3 text-red-300" role="alert">
+          Failed to load statistics: {errorMessage(statsError, "the management API is unreachable.")}
+          {" "}The numbers below may be stale or incomplete.
+        </div>
+      )}
 
       {/* Stats Cards */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
@@ -211,7 +248,7 @@ export default function DashboardPage() {
         >
           <StatsCard
             title="Fields Masked"
-            value={stats?.masking?.total ?? 0}
+            value={maskingTotal}
             description="Total PII values anonymized"
             icon={<Eye className="h-5 w-5" />}
             variant="success"
@@ -246,7 +283,7 @@ export default function DashboardPage() {
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <ConnectionsChart 
+                <ConnectionsChart
                   data={connectionHistory}
                   title=""
                 />
@@ -257,18 +294,36 @@ export default function DashboardPage() {
               <CardHeader>
                 <CardTitle className="text-white flex items-center gap-2">
                   <Database className="h-5 w-5 text-emerald-400" />
-                  Query Activity
+                  Query Activity (per interval)
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <MultiLineChart 
+                <MultiLineChart
                   data={connectionHistory}
                   title=""
                   lines={[
-                    { key: "queries", color: "#6366f1", name: "Queries" },
-                    { key: "masked", color: "#10b981", name: "Masked Fields" },
+                    { key: "queries", color: "#6366f1", name: "Queries / interval" },
+                    { key: "masked", color: "#10b981", name: "Masked Fields / interval" },
                   ]}
                 />
+              </CardContent>
+            </Card>
+
+            <Card className="bg-gray-900 border-gray-800 lg:col-span-2">
+              <CardHeader>
+                <CardTitle className="text-white flex items-center gap-2">
+                  <Database className="h-5 w-5 text-violet-400" />
+                  Query Types Distribution
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {queryTypeData.length > 0 ? (
+                  <QueryTypesChart data={queryTypeData} title="" />
+                ) : (
+                  <div className="h-[260px] flex items-center justify-center text-gray-500 text-sm">
+                    No queries recorded yet.
+                  </div>
+                )}
               </CardContent>
             </Card>
           </div>
@@ -281,7 +336,7 @@ export default function DashboardPage() {
                 <CardTitle className="text-white">Masking Operations by Strategy</CardTitle>
               </CardHeader>
               <CardContent>
-                <MaskingStatsChart 
+                <MaskingStatsChart
                   data={maskingStats}
                   title=""
                 />
@@ -295,10 +350,9 @@ export default function DashboardPage() {
               <CardContent>
                 <div className="space-y-4">
                   {maskingStats.map((stat, idx) => {
-                    const total = maskingStats.reduce((sum, s) => sum + s.count, 0)
-                    const percentage = total > 0 ? (stat.count / total) * 100 : 0
+                    const percentage = maskingTotal > 0 ? (stat.count / maskingTotal) * 100 : 0
                     const colors = ["bg-indigo-500", "bg-violet-500", "bg-cyan-500", "bg-emerald-500", "bg-amber-500"]
-                    
+
                     return (
                       <div key={stat.strategy} className="space-y-2">
                         <div className="flex items-center justify-between text-sm">
@@ -306,7 +360,7 @@ export default function DashboardPage() {
                           <span className="text-white font-medium">{stat.count} ({percentage.toFixed(1)}%)</span>
                         </div>
                         <div className="w-full bg-gray-800 rounded-full h-2">
-                          <motion.div 
+                          <motion.div
                             className={`h-2 rounded-full ${colors[idx % colors.length]}`}
                             initial={{ width: 0 }}
                             animate={{ width: `${percentage}%` }}
@@ -344,7 +398,7 @@ export default function DashboardPage() {
                         className="flex items-center justify-between p-4 bg-gray-950 rounded-lg border border-gray-800"
                       >
                         <div className="flex items-center gap-4">
-                          <Badge 
+                          <Badge
                             variant={log.event_type === "DataMasked" ? "purple" : "info"}
                           >
                             {log.event_type}
@@ -374,28 +428,14 @@ export default function DashboardPage() {
       </Tabs>
 
       {/* Quick Stats Footer */}
-      <div className="grid gap-4 md:grid-cols-3">
+      <div className="grid gap-4 md:grid-cols-2">
         <Card className="bg-gray-900 border-gray-800">
           <CardContent className="pt-6">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm text-gray-400">Uptime</p>
-                <p className="text-2xl font-bold text-white">99.9%</p>
-              </div>
-              <div className="p-3 bg-emerald-500/10 rounded-lg">
-                <Clock className="h-5 w-5 text-emerald-400" />
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card className="bg-gray-900 border-gray-800">
-          <CardContent className="pt-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm text-gray-400">Total Queries Today</p>
+                <p className="text-sm text-gray-400">Total Queries</p>
                 <p className="text-2xl font-bold text-white">
-                  {(logs?.logs?.length ?? 0) * 47}
+                  {stats?.queries?.total ?? 0}
                 </p>
               </div>
               <div className="p-3 bg-indigo-500/10 rounded-lg">
@@ -409,9 +449,9 @@ export default function DashboardPage() {
           <CardContent className="pt-6">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm text-gray-400">Fields Masked Today</p>
+                <p className="text-sm text-gray-400">Total Fields Masked</p>
                 <p className="text-2xl font-bold text-white">
-                  {maskingStats.reduce((sum, s) => sum + s.count, 0) * 12}
+                  {maskingTotal}
                 </p>
               </div>
               <div className="p-3 bg-purple-500/10 rounded-lg">

@@ -6,7 +6,7 @@ The web dashboard for IronVeil database proxy. Built with Next.js 16, React 19, 
 
 - **Dashboard**: Real-time system status with live charts, connection graphs, and masking statistics
 - **Masking Rules**: View, add, test, and manage data masking rules with live preview
-- **Rule Testing**: Test masking strategies with sample data before saving
+- **Rule Testing**: Preview illustrative masking output per strategy before saving (actual masking happens server-side)
 - **PII Scanner**: Scan database for potential PII columns with editable connection settings and one-click rule creation
 - **Live Inspector**: Real-time query monitoring with masked data details
 - **Settings**: Global masking controls, theme selection, and configuration export
@@ -16,7 +16,7 @@ The web dashboard for IronVeil database proxy. Built with Next.js 16, React 19, 
 
 ### Prerequisites
 
-- Node.js 18+
+- Node.js 20.9+ (required by Next.js 16; enforced via the `engines` field in `package.json`)
 - The IronVeil proxy running on port 3001 (API)
 
 ### Development
@@ -88,7 +88,10 @@ web/
 │   │       ├── tooltip.tsx
 │   │       └── card.tsx
 │   └── lib/
-│       └── utils.ts       # Utility functions (cn, formatBytes, etc.)
+│       ├── api.ts         # API client (auth, timeouts, error handling)
+│       ├── query.ts       # Shared TanStack Query polling/retry policies
+│       ├── masking-preview.ts # Illustrative strategy previews
+│       └── utils.ts       # Utility functions (cn)
 ├── package.json
 └── next.config.ts
 ```
@@ -128,7 +131,9 @@ The dashboard connects to the IronVeil Management API:
 | `/health` | GET | Service health check with upstream status |
 | `/rules` | GET | List masking rules (`{ "rules": [...] }`) |
 | `/rules` | POST | Add or update a masking rule (upsert by `table`+`column`) |
-| `/rules/delete` | POST | Delete a rule by index or column/table |
+| `/rules/delete` | POST | Delete a rule by `{ "table": ..., "column": ... }` |
+| `/rules/export` | GET | Export the rules array (restorable via `/rules/import`) |
+| `/rules/import` | POST | Import a bare rules array |
 | `/config` | GET | Get config summary (`masking_enabled`, `rules_count`) |
 | `/config` | POST | Update configuration |
 | `/stats` | GET | Get dashboard statistics (connections, queries, masking, history) |
@@ -143,7 +148,7 @@ The dashboard connects to the IronVeil Management API:
 ```json
 {
   "status": "ok",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "upstream": {
     "host": "localhost",
     "port": 5432,
@@ -157,8 +162,8 @@ The dashboard connects to the IronVeil Management API:
 
 ```json
 {
-  "username": "postgres",
-  "password": "password",
+  "username": "<db-username>",
+  "password": "<db-password>",
   "database": "postgres",
   "schema": "public",
   "sample_size": 100,
@@ -166,6 +171,9 @@ The dashboard connects to the IronVeil Management API:
   "exclude_tables": []
 }
 ```
+
+The scanner form does not pre-fill credentials; both username and password must be
+entered before a scan can be started.
 
 `POST /scan` and `POST /schema` can return:
 
@@ -201,24 +209,33 @@ npm run build
 
 ## API Configuration
 
-The dashboard uses these optional client-side settings:
+The dashboard uses this optional client-side setting:
 
 - `NEXT_PUBLIC_API_BASE_URL`: Override API origin (default: `http://localhost:3001`)
-- `NEXT_PUBLIC_IRONVEIL_API_KEY`: Optional API key header (`X-API-Key`)
-- `NEXT_PUBLIC_IRONVEIL_BEARER_TOKEN`: Optional bearer token (`Authorization: Bearer ...`)
 
-At runtime in the browser, you can also override auth via local storage keys:
+Credentials are never configured through `NEXT_PUBLIC_*` environment variables:
+those values are inlined into the public JavaScript bundle at build time and would
+leak to anyone who can load the dashboard.
 
-- `ironveil.api_key`
-- `ironveil.jwt`
-
-The Settings page includes an **API Authentication** panel that writes these values for you.
+API authentication is configured at runtime from the Settings page **API
+Authentication** panel. You pick exactly one auth mode (`None`, `API Key`, or
+`Bearer Token`) and enter the matching credential; the client then sends exactly
+one of `X-API-Key` or `Authorization: Bearer ...` per request, never both. The
+credential is kept in `sessionStorage` (keys `ironveil.auth_mode` and
+`ironveil.auth_credential`), so it is cleared when the tab closes, and the panel
+includes a **Clear Credentials** action to remove it immediately.
 
 Frontend API behavior:
 
 - The shared client (`web/src/lib/api.ts`) throws an `ApiError` for non-2xx responses.
 - `ApiError` includes `status`, `code` (if present), `endpoint`, and parsed error payload.
-- Scanner UI surfaces backend errors (for example `auth_required`) directly in an alert banner.
+- Requests are aborted after 15 seconds via `AbortController` so hangs surface as errors.
+- `/health` is special-cased: a 503 "degraded" body is returned as data instead of thrown,
+  so the UI can distinguish "upstream degraded" from "API unreachable".
+- Pages poll via TanStack Query with shared policies (`web/src/lib/query.ts`): polling
+  stops on 401, backs off on 5xx/network errors, and pauses in background tabs.
+- All pages surface fetch failures in visible `role="alert"` banners (scanner errors such
+  as `auth_required` included) rather than silently rendering empty state.
 
 ## Screenshots
 
@@ -229,4 +246,5 @@ Real-time monitoring with connection charts, masking statistics, and activity fe
 Create, test, and manage masking rules with live preview functionality.
 
 ### Settings
-Configure themes, global masking toggle, and export configuration.
+Configure themes, global masking toggle (with confirmation before disabling), API
+authentication, and rules export (`ironveil-rules.json`, restorable via `/rules/import`).

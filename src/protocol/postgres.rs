@@ -58,10 +58,23 @@ pub struct DataRow {
     pub values: Vec<Option<BytesMut>>,
 }
 
+/// Upper bound for a regular message frame. The 32-bit wire length is
+/// attacker-controlled on an unauthenticated socket; without a cap, four bytes
+/// of 0xFF forced a ~4 GiB BytesMut reservation before any authentication.
+const MAX_FRAME_LEN: usize = 64 * 1024 * 1024;
+/// PostgreSQL itself caps startup packets at 10000 bytes.
+const MAX_STARTUP_LEN: usize = 10_000;
+
 pub struct PostgresCodec {
     // State to track if we are expecting a startup message (first message)
     // or regular messages.
     is_startup: bool,
+}
+
+impl Default for PostgresCodec {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PostgresCodec {
@@ -91,6 +104,10 @@ impl Decoder for PostgresCodec {
         if self.is_startup {
             // Startup packet: [Length (4 bytes)] [Protocol Version (4 bytes)] [Params...]
             // OR SSLRequest: [Length (4 bytes)] [1234 in high 16 bits] [5679 in low 16 bits]
+
+            if !(8..=MAX_STARTUP_LEN).contains(&length) {
+                anyhow::bail!("invalid startup packet length {}", length);
+            }
 
             if src.len() < length {
                 src.reserve(length - src.len());
@@ -144,6 +161,14 @@ impl Decoder for PostgresCodec {
             length_bytes.copy_from_slice(&src[1..5]);
             let length = u32::from_be_bytes(length_bytes) as usize;
 
+            if !(4..=MAX_FRAME_LEN).contains(&length) {
+                anyhow::bail!(
+                    "invalid message length {} for type '{}'",
+                    length,
+                    message_type as char
+                );
+            }
+
             // Total frame size = 1 (type) + length
             let frame_len = 1 + length;
 
@@ -158,10 +183,18 @@ impl Decoder for PostgresCodec {
             match message_type {
                 b'T' => {
                     // RowDescription
+                    if data.remaining() < 2 {
+                        anyhow::bail!("Malformed RowDescription: missing field count");
+                    }
                     let num_fields = data.get_u16();
                     let mut fields = Vec::with_capacity(num_fields as usize);
                     for _ in 0..num_fields {
                         let name = read_cstring_bytes(&mut data)?;
+                        // table_oid(4) + column_index(2) + type_oid(4)
+                        // + type_len(2) + type_modifier(4) + format_code(2)
+                        if data.remaining() < 18 {
+                            anyhow::bail!("Malformed RowDescription: truncated field");
+                        }
                         let table_oid = data.get_u32();
                         let column_index = data.get_u16();
                         let type_oid = data.get_u32();
@@ -230,7 +263,13 @@ impl Decoder for PostgresCodec {
                 b'P' => {
                     let statement = read_cstring_bytes(&mut data)?;
                     let query = read_cstring_bytes(&mut data)?;
+                    if data.remaining() < 2 {
+                        anyhow::bail!("Malformed Parse: missing parameter count");
+                    }
                     let num_params = data.get_u16();
+                    if data.remaining() < num_params as usize * 4 {
+                        anyhow::bail!("Malformed Parse: truncated parameter types");
+                    }
                     let mut param_types = Vec::with_capacity(num_params as usize);
                     for _ in 0..num_params {
                         param_types.push(data.get_u32());

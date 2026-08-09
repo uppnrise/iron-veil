@@ -1,0 +1,19 @@
+# Opt-in TLS override for the demo postgres service.
+#
+# Prerequisite: generate certificates first (this also fixes the key
+# ownership/permissions so the postgres container can read it):
+#
+#   ./scripts/generate_certs.sh
+#
+# Usage:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d --build
+services:
+  postgres:
+    volumes:
+      - ./certs:/etc/postgresql/certs:ro
+    command: >
+      postgres
+      -c ssl=on
+      -c ssl_cert_file=/etc/postgresql/certs/server.crt
+      -c ssl_key_file=/etc/postgresql/certs/server.key

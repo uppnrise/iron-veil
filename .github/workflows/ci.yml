@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -18,20 +22,14 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
 
       - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --release --locked
 
   test:
     name: Test
@@ -42,17 +40,11 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
 
       - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        uses: Swatinem/rust-cache@v2
 
       - name: Start integration dependencies
         run: docker compose up -d --build
@@ -60,20 +52,31 @@ jobs:
       - name: Wait for proxy API readiness
         run: |
           for i in {1..60}; do
-            if curl -fsS http://127.0.0.1:3001/health > /dev/null; then
-              echo "Proxy API is ready"
+            # Prefer host-published port; fall back to in-container curl so a
+            # loopback-only API bind still unblocks diagnostics.
+            if curl -fsS http://127.0.0.1:3001/health 2>/dev/null \
+                | jq -e '.upstream.healthy == true' > /dev/null 2>&1; then
+              echo "Proxy API is ready and upstream is healthy (host :3001)"
               exit 0
             fi
-            echo "Waiting for proxy API... ($i/60)"
+            if docker compose exec -T proxy curl -fsS http://127.0.0.1:3001/health 2>/dev/null \
+                | jq -e '.upstream.healthy == true' > /dev/null 2>&1; then
+              echo "Proxy API is healthy inside the container, but host :3001 is not reachable."
+              echo "Published management API must bind 0.0.0.0 (see proxy.compose.yaml)."
+              docker compose ps
+              docker compose logs --no-color --tail=50 proxy || true
+              exit 1
+            fi
+            echo "Waiting for proxy API / healthy upstream... ($i/60)"
             sleep 2
           done
-          echo "Proxy API did not become ready in time"
+          echo "Proxy API did not report a healthy upstream in time"
           docker compose ps
           docker compose logs --no-color proxy postgres || true
           exit 1
 
       - name: Run tests
-        run: cargo test --all-features
+        run: cargo test --all-features --locked
 
       - name: Show container logs on failure
         if: failure()
@@ -82,6 +85,31 @@ jobs:
       - name: Stop integration dependencies
         if: always()
         run: docker compose down -v --remove-orphans
+
+  e2e:
+    name: E2E (${{ matrix.protocol }})
+    runs-on: ubuntu-latest
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        protocol: [postgres, mysql]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Run E2E suite
+        run: ./scripts/test_e2e.sh ${{ matrix.protocol }}
 
   lint:
     name: Static Analysis
@@ -92,10 +120,118 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.97.1"
           components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
         run: cargo fmt --check
 
       - name: Run Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+  audit:
+    name: Cargo Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97.1"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Run cargo audit
+        continue-on-error: true
+        run: cargo audit
+
+  web:
+    name: Web Dashboard
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Dependency audit
+        continue-on-error: true
+        run: npm audit --audit-level=high --omit=dev
+
+  publish-image:
+    name: Publish Container Image
+    runs-on: ubuntu-latest
+    needs: [test, e2e, lint, audit, web]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read image coordinates
+        id: image
+        run: |
+          echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          version="$(cargo metadata --locked --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "iron-veil") | .version')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image metadata
+        id: metadata
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=raw,value=${{ steps.image.outputs.version }}
+            type=raw,value=latest
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
