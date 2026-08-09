@@ -7,7 +7,7 @@ WORKDIR /usr/src/app
 COPY . .
 
 RUN cargo build --release \
-    && file target/release/iron-veil | grep -q "statically linked"
+    && file target/release/iron-veil | grep -Eq "statically linked|static-pie linked"
 
 # A scratch runtime contains no package manager or OS packages for scanners to flag.
 FROM scratch
