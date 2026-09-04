@@ -79,6 +79,7 @@ export default function SettingsPage() {
   }
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- known false positive for async data fetching on mount.
     fetchConfig()
     fetchHealth()
     if (typeof window !== "undefined") {
