@@ -89,6 +89,7 @@ export default function RulesPage() {
   }
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- known false positive for async data fetching on mount.
     fetchRules()
   }, [])
 

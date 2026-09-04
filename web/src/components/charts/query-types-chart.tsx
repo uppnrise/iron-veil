@@ -94,10 +94,13 @@ export function QueryTypesChart({
                 borderRadius: "8px",
                 color: "#f9fafb",
               }}
-              formatter={(value: number) => [
-                `${value} (${((value / total) * 100).toFixed(1)}%)`,
-                "Count",
-              ]}
+              formatter={(value) => {
+                const numericValue = Number(value ?? 0)
+                return [
+                  `${numericValue} (${((numericValue / total) * 100).toFixed(1)}%)`,
+                  "Count",
+                ]
+              }}
             />
             <Legend
               wrapperStyle={{
