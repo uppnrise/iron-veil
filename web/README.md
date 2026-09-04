@@ -143,7 +143,7 @@ The dashboard connects to the IronVeil Management API:
 ```json
 {
   "status": "ok",
-  "version": "0.1.1",
+  "version": "0.1.3",
   "upstream": {
     "host": "localhost",
     "port": 5432,

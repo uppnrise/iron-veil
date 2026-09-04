@@ -226,7 +226,7 @@ The management API runs on port 3001 by default.
 ```json
 {
   "status": "ok",
-  "version": "0.1.1",
+  "version": "0.1.3",
   "upstream": {
     "host": "localhost",
     "port": 5432,
