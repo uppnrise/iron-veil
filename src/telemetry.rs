@@ -38,10 +38,7 @@ pub fn init_telemetry(config: Option<&TelemetryConfig>) -> Result<Option<Telemet
                 .with_resource(
                     Resource::builder_empty()
                         .with_attribute(KeyValue::new("service.name", cfg.service_name.clone()))
-                        .with_attribute(KeyValue::new(
-                            "service.version",
-                            env!("CARGO_PKG_VERSION"),
-                        ))
+                        .with_attribute(KeyValue::new("service.version", env!("CARGO_PKG_VERSION")))
                         .build(),
                 )
                 .build();

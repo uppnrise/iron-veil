@@ -40,7 +40,6 @@ fn hash_value(value: &[u8]) -> String {
     format!("sha256:{hex}")
 }
 
-
 /// Convert PiiType to masking strategy string
 fn pii_type_to_strategy(pii_type: PiiType) -> &'static str {
     match pii_type {
