@@ -9,8 +9,8 @@ use opentelemetry::KeyValue;
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{
-    Resource, runtime,
-    trace::{RandomIdGenerator, Sampler, TracerProvider as SdkTracerProvider},
+    Resource,
+    trace::{RandomIdGenerator, Sampler, SdkTracerProvider},
 };
 use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
@@ -32,13 +32,15 @@ pub fn init_telemetry(config: Option<&TelemetryConfig>) -> Result<Option<Telemet
 
             // Build the tracer provider
             let provider = SdkTracerProvider::builder()
-                .with_batch_exporter(exporter, runtime::Tokio)
+                .with_batch_exporter(exporter)
                 .with_sampler(Sampler::AlwaysOn)
                 .with_id_generator(RandomIdGenerator::default())
-                .with_resource(Resource::new(vec![
-                    KeyValue::new("service.name", cfg.service_name.clone()),
-                    KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
-                ]))
+                .with_resource(
+                    Resource::builder_empty()
+                        .with_attribute(KeyValue::new("service.name", cfg.service_name.clone()))
+                        .with_attribute(KeyValue::new("service.version", env!("CARGO_PKG_VERSION")))
+                        .build(),
+                )
                 .build();
 
             // Get a tracer from the provider
