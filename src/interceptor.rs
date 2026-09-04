@@ -31,8 +31,13 @@ fn generate_fake_data(strategy: &str, seed: u64) -> String {
 }
 
 fn hash_value(value: &[u8]) -> String {
+    use std::fmt::Write;
     let digest = Sha256::digest(value);
-    format!("sha256:{:x}", digest)
+    let hex = digest.iter().fold(String::new(), |mut acc, byte| {
+        let _ = write!(acc, "{byte:02x}");
+        acc
+    });
+    format!("sha256:{hex}")
 }
 
 /// Convert PiiType to masking strategy string
