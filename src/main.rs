@@ -26,8 +26,6 @@ use bytes::{BufMut, Bytes};
 use chrono::Utc;
 use futures::{SinkExt, StreamExt};
 use rustls_platform_verifier::Verifier;
-use std::fs::File;
-use std::io::BufReader;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tokio::io::AsyncReadExt;
@@ -37,7 +35,9 @@ use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls::ClientConfig;
 use tokio_rustls::rustls::crypto::aws_lc_rs::default_provider;
 use tokio_rustls::rustls::pki_types::ServerName;
-use tokio_rustls::rustls::{ServerConfig, pki_types::CertificateDer, pki_types::PrivateKeyDer};
+use tokio_rustls::rustls::{
+    ServerConfig, pki_types::CertificateDer, pki_types::PrivateKeyDer, pki_types::pem::PemObject,
+};
 use tokio_util::codec::Framed;
 
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
@@ -1318,18 +1318,11 @@ where
 }
 
 fn load_certs(path: &str) -> Result<Vec<CertificateDer<'static>>> {
-    let certfile = File::open(path)?;
-    let mut reader = BufReader::new(certfile);
-    let certs = rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>()?;
-    Ok(certs)
+    Ok(CertificateDer::pem_file_iter(path)?.collect::<Result<Vec<_>, _>>()?)
 }
 
 fn load_keys(path: &str) -> Result<PrivateKeyDer<'static>> {
-    let keyfile = File::open(path)?;
-    let mut reader = BufReader::new(keyfile);
-    let key = rustls_pemfile::private_key(&mut reader)?
-        .ok_or_else(|| anyhow::anyhow!("No private key found"))?;
-    Ok(key)
+    Ok(PrivateKeyDer::from_pem_file(path)?)
 }
 
 #[cfg(test)]

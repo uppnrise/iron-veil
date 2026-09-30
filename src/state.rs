@@ -267,7 +267,7 @@ impl AppState {
     /// Save current config to the config file
     pub async fn save_config(&self) -> Result<(), std::io::Error> {
         let config = self.config.read().await;
-        let yaml = serde_yaml::to_string(&*config)
+        let yaml = serde_yaml_ng::to_string(&*config)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         std::fs::write(&*self.config_path, yaml)
     }
