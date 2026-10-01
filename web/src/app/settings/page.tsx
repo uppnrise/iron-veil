@@ -138,10 +138,9 @@ export default function SettingsPage() {
       const a = document.createElement("a")
       a.href = url
       a.download = "ironveil-config.json"
-      document.body.appendChild(a)
+      // Clicking a detached anchor avoids inserting remote-derived data into the DOM.
       a.click()
       window.URL.revokeObjectURL(url)
-      document.body.removeChild(a)
     } catch (error) {
       console.error("Failed to export config", error)
     }
