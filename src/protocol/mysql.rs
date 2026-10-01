@@ -907,4 +907,387 @@ mod tests {
             assert_eq!(decoded, val);
         }
     }
+
+    fn encode_one(msg: MySqlMessage, flags: u32) -> BytesMut {
+        let mut codec = MySqlCodec::new_server();
+        codec.set_capability_flags(flags);
+        let mut buf = BytesMut::new();
+        codec.encode(msg, &mut buf).unwrap();
+        buf
+    }
+
+    fn client_in_command_state(flags: u32) -> MySqlCodec {
+        let mut codec = MySqlCodec::new_client();
+        codec.state = MySqlState::Command;
+        codec.set_capability_flags(flags);
+        codec
+    }
+
+    fn generic(seq: u8, payload: &[u8]) -> MySqlMessage {
+        MySqlMessage::Generic(GenericPacket {
+            sequence_id: seq,
+            payload: BytesMut::from(payload),
+        })
+    }
+
+    #[test]
+    fn test_read_lenenc_int_8byte_null_and_invalid() {
+        let mut buf = vec![0xfe];
+        buf.extend_from_slice(&0x0102030405060708u64.to_le_bytes());
+        assert_eq!(read_lenenc_int(&buf).unwrap(), (0x0102030405060708, 9));
+
+        assert_eq!(read_lenenc_int(&[0xfb]).unwrap(), (0, 1));
+        assert!(read_lenenc_int(&[0xff]).is_err());
+        assert!(read_lenenc_int(&[]).is_err());
+        assert!(read_lenenc_int(&[0xfc, 0x01]).is_err());
+        assert!(read_lenenc_int(&[0xfd, 0x01, 0x02]).is_err());
+        assert!(read_lenenc_int(&[0xfe, 0x01]).is_err());
+    }
+
+    #[test]
+    fn test_lenenc_int_roundtrip_8byte() {
+        let mut buf = BytesMut::new();
+        write_lenenc_int(&mut buf, u64::MAX);
+        assert_eq!(read_lenenc_int(&buf).unwrap(), (u64::MAX, 9));
+    }
+
+    #[test]
+    fn test_read_lenenc_string_and_null_terminated_errors() {
+        let mut short = BytesMut::from(&[0x05, b'a', b'b'][..]);
+        assert!(read_lenenc_string(&mut short).is_err());
+
+        let mut ok = BytesMut::from(&[0x02, b'h', b'i'][..]);
+        assert_eq!(&read_lenenc_string(&mut ok).unwrap()[..], b"hi");
+
+        let mut unterminated = BytesMut::from(&b"abc"[..]);
+        assert!(read_null_terminated_string(&mut unterminated).is_err());
+
+        let mut terminated = BytesMut::from(&b"abc\0rest"[..]);
+        assert_eq!(read_null_terminated_string(&mut terminated).unwrap(), "abc");
+        assert_eq!(&terminated[..], b"rest");
+    }
+
+    #[test]
+    fn test_decode_returns_none_for_incomplete_packet() {
+        let mut codec = MySqlCodec::new_server();
+        assert!(
+            codec
+                .decode(&mut BytesMut::from(&[0x01][..]))
+                .unwrap()
+                .is_none()
+        );
+
+        // Header says 5 payload bytes but only 2 are present.
+        let mut partial = BytesMut::from(&[0x05, 0x00, 0x00, 0x00, 0x01, 0x02][..]);
+        assert!(codec.decode(&mut partial).unwrap().is_none());
+        assert_eq!(partial.len(), 6);
+    }
+
+    #[test]
+    fn test_server_decodes_com_query() {
+        let mut codec = MySqlCodec::new_server();
+        codec.state = MySqlState::Command;
+
+        let mut buf = encode_one(
+            MySqlMessage::Query(QueryPacket {
+                sequence_id: 0,
+                query: Bytes::from_static(b"SELECT 1"),
+            }),
+            0,
+        );
+
+        match codec.decode(&mut buf).unwrap() {
+            Some(MySqlMessage::Query(q)) => assert_eq!(&q.query[..], b"SELECT 1"),
+            other => panic!("expected query, got {other:?}"),
+        }
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_empty_command_packet_is_generic() {
+        let mut codec = MySqlCodec::new_server();
+        codec.state = MySqlState::Command;
+        let mut buf = BytesMut::from(&[0x00, 0x00, 0x00, 0x07][..]);
+
+        match codec.decode(&mut buf).unwrap() {
+            Some(MySqlMessage::Generic(g)) => {
+                assert_eq!(g.sequence_id, 7);
+                assert!(g.payload.is_empty());
+            }
+            other => panic!("expected generic, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_ok_packet_roundtrip() {
+        let ok = OkPacket {
+            sequence_id: 1,
+            affected_rows: 3,
+            last_insert_id: 300,
+            status_flags: 2,
+            warnings: 1,
+            info: Bytes::from_static(b"done"),
+        };
+        let mut buf = encode_one(MySqlMessage::Ok(ok), CLIENT_PROTOCOL_41);
+
+        match client_in_command_state(CLIENT_PROTOCOL_41)
+            .decode(&mut buf)
+            .unwrap()
+        {
+            Some(MySqlMessage::Ok(o)) => {
+                assert_eq!(o.sequence_id, 1);
+                assert_eq!(o.affected_rows, 3);
+                assert_eq!(o.last_insert_id, 300);
+                assert_eq!(o.status_flags, 2);
+                assert_eq!(o.warnings, 1);
+                assert_eq!(&o.info[..], b"done");
+            }
+            other => panic!("expected ok, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_err_packet_roundtrip_with_and_without_protocol_41() {
+        let err = ErrPacket {
+            sequence_id: 2,
+            error_code: 1045,
+            sql_state: *b"28000",
+            error_message: "Access denied".to_string(),
+        };
+
+        let mut buf = encode_one(MySqlMessage::Err(err.clone()), CLIENT_PROTOCOL_41);
+        match client_in_command_state(CLIENT_PROTOCOL_41)
+            .decode(&mut buf)
+            .unwrap()
+        {
+            Some(MySqlMessage::Err(e)) => {
+                assert_eq!(e.error_code, 1045);
+                assert_eq!(&e.sql_state, b"28000");
+                assert_eq!(e.error_message, "Access denied");
+            }
+            other => panic!("expected err, got {other:?}"),
+        }
+
+        let mut buf = encode_one(MySqlMessage::Err(err), 0);
+        match client_in_command_state(0).decode(&mut buf).unwrap() {
+            Some(MySqlMessage::Err(e)) => {
+                assert_eq!(e.sql_state, [0u8; 5]);
+                assert_eq!(e.error_message, "Access denied");
+            }
+            other => panic!("expected err, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_eof_packet_roundtrip() {
+        let mut buf = encode_one(
+            MySqlMessage::Eof(EofPacket {
+                sequence_id: 4,
+                warnings: 5,
+                status_flags: 6,
+            }),
+            0,
+        );
+
+        match client_in_command_state(0).decode(&mut buf).unwrap() {
+            Some(MySqlMessage::Eof(e)) => {
+                assert_eq!((e.sequence_id, e.warnings, e.status_flags), (4, 5, 6));
+            }
+            other => panic!("expected eof, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_client_decodes_full_result_set() {
+        let mut codec = client_in_command_state(0);
+        let mut wire = BytesMut::new();
+
+        // Column count, one column, EOF, two rows (one NULL), EOF.
+        wire.extend_from_slice(&encode_one(generic(1, &[0x01]), 0));
+        wire.extend_from_slice(&encode_one(
+            MySqlMessage::ColumnDefinition(ColumnDefinition {
+                sequence_id: 2,
+                catalog: Bytes::from_static(b"def"),
+                schema: Bytes::from_static(b"db"),
+                table: Bytes::from_static(b"users"),
+                org_table: Bytes::from_static(b"users"),
+                name: Bytes::from_static(b"email"),
+                org_name: Bytes::from_static(b"email"),
+                character_set: 33,
+                column_length: 255,
+                column_type: 0xfd,
+                flags: 1,
+                decimals: 0,
+            }),
+            0,
+        ));
+        let eof = |seq| {
+            encode_one(
+                MySqlMessage::Eof(EofPacket {
+                    sequence_id: seq,
+                    warnings: 0,
+                    status_flags: 0,
+                }),
+                0,
+            )
+        };
+        wire.extend_from_slice(&eof(3));
+        wire.extend_from_slice(&encode_one(
+            MySqlMessage::ResultRow(ResultRow {
+                sequence_id: 4,
+                values: vec![Some(BytesMut::from(&b"a@b.c"[..]))],
+            }),
+            0,
+        ));
+        wire.extend_from_slice(&encode_one(
+            MySqlMessage::ResultRow(ResultRow {
+                sequence_id: 5,
+                values: vec![None],
+            }),
+            0,
+        ));
+        wire.extend_from_slice(&eof(6));
+
+        assert!(matches!(
+            codec.decode(&mut wire).unwrap(),
+            Some(MySqlMessage::Generic(_))
+        ));
+        assert_eq!(codec.state, MySqlState::ReadingColumns { remaining: 1 });
+
+        match codec.decode(&mut wire).unwrap() {
+            Some(MySqlMessage::ColumnDefinition(c)) => {
+                assert_eq!(&c.name[..], b"email");
+                assert_eq!(&c.table[..], b"users");
+                assert_eq!(c.character_set, 33);
+                assert_eq!(c.column_length, 255);
+                assert_eq!(c.column_type, 0xfd);
+            }
+            other => panic!("expected column definition, got {other:?}"),
+        }
+
+        assert!(matches!(
+            codec.decode(&mut wire).unwrap(),
+            Some(MySqlMessage::Eof(_))
+        ));
+        assert_eq!(codec.state, MySqlState::ReadingRows);
+
+        match codec.decode(&mut wire).unwrap() {
+            Some(MySqlMessage::ResultRow(r)) => {
+                assert_eq!(r.values.len(), 1);
+                assert_eq!(&r.values[0].as_ref().unwrap()[..], b"a@b.c");
+            }
+            other => panic!("expected row, got {other:?}"),
+        }
+        match codec.decode(&mut wire).unwrap() {
+            Some(MySqlMessage::ResultRow(r)) => assert!(r.values[0].is_none()),
+            other => panic!("expected row, got {other:?}"),
+        }
+
+        assert!(matches!(
+            codec.decode(&mut wire).unwrap(),
+            Some(MySqlMessage::Eof(_))
+        ));
+        assert_eq!(codec.state, MySqlState::Command);
+    }
+
+    #[test]
+    fn test_reading_rows_handles_err_and_deprecate_eof_ok() {
+        let mut codec = client_in_command_state(CLIENT_PROTOCOL_41 | CLIENT_DEPRECATE_EOF);
+        codec.state = MySqlState::ReadingRows;
+        let mut buf = encode_one(
+            MySqlMessage::Ok(OkPacket {
+                sequence_id: 9,
+                affected_rows: 0,
+                last_insert_id: 0,
+                status_flags: 0,
+                warnings: 0,
+                info: Bytes::new(),
+            }),
+            CLIENT_PROTOCOL_41,
+        );
+        assert!(matches!(
+            codec.decode(&mut buf).unwrap(),
+            Some(MySqlMessage::Ok(_))
+        ));
+        assert_eq!(codec.state, MySqlState::Command);
+
+        codec.state = MySqlState::ReadingRows;
+        let mut buf = encode_one(
+            MySqlMessage::Err(ErrPacket {
+                sequence_id: 1,
+                error_code: 1,
+                sql_state: *b"HY000",
+                error_message: "boom".into(),
+            }),
+            CLIENT_PROTOCOL_41,
+        );
+        assert!(matches!(
+            codec.decode(&mut buf).unwrap(),
+            Some(MySqlMessage::Err(_))
+        ));
+        assert_eq!(codec.state, MySqlState::Command);
+    }
+
+    #[test]
+    fn test_generic_packet_roundtrip_preserves_bytes() {
+        let buf = encode_one(generic(3, &[0x10, 0x20, 0x30]), 0);
+        assert_eq!(&buf[..], &[0x03, 0x00, 0x00, 0x03, 0x10, 0x20, 0x30]);
+    }
+
+    #[test]
+    fn test_handshake_roundtrip() {
+        let hs = HandshakeV10 {
+            protocol_version: 10,
+            server_version: "8.0.36".into(),
+            connection_id: 42,
+            auth_plugin_data_part1: [1, 2, 3, 4, 5, 6, 7, 8],
+            capability_flags: CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION | CLIENT_PLUGIN_AUTH,
+            character_set: 33,
+            status_flags: 2,
+            auth_plugin_data_part2: vec![9; 12],
+            auth_plugin_name: "mysql_native_password".into(),
+        };
+        let mut buf = encode_one(MySqlMessage::Handshake(hs.clone()), 0);
+
+        let mut codec = MySqlCodec::new_client();
+        match codec.decode(&mut buf).unwrap() {
+            Some(MySqlMessage::Handshake(h)) => {
+                assert_eq!(h.protocol_version, 10);
+                assert_eq!(h.server_version, "8.0.36");
+                assert_eq!(h.connection_id, 42);
+                assert_eq!(h.auth_plugin_data_part1, hs.auth_plugin_data_part1);
+                assert_eq!(h.capability_flags, hs.capability_flags);
+                assert_eq!(h.auth_plugin_name, "mysql_native_password");
+            }
+            other => panic!("expected handshake, got {other:?}"),
+        }
+        assert_eq!(codec.state, MySqlState::WaitingHandshakeResponse);
+    }
+
+    #[test]
+    fn test_handshake_response_roundtrip() {
+        let caps = CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION | CLIENT_PLUGIN_AUTH | (1 << 3);
+        let resp = HandshakeResponse {
+            capability_flags: caps,
+            max_packet_size: 1 << 24,
+            character_set: 33,
+            username: "root".into(),
+            auth_response: vec![7; 20],
+            database: Some("app".into()),
+            auth_plugin_name: Some("mysql_native_password".into()),
+        };
+        let mut buf = encode_one(MySqlMessage::HandshakeResponse(resp), 0);
+
+        let mut codec = MySqlCodec::new_server();
+        codec.state = MySqlState::WaitingHandshakeResponse;
+        match codec.decode(&mut buf).unwrap() {
+            Some(MySqlMessage::HandshakeResponse(r)) => {
+                assert_eq!(r.username, "root");
+                assert_eq!(r.auth_response, vec![7; 20]);
+                assert_eq!(r.database.as_deref(), Some("app"));
+            }
+            other => panic!("expected handshake response, got {other:?}"),
+        }
+        assert_eq!(codec.state, MySqlState::Command);
+    }
 }

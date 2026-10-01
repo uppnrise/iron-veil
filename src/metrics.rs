@@ -126,4 +126,48 @@ mod tests {
                 .contains("ironveil_test_init_idempotent_total 1")
         );
     }
+
+    #[test]
+    fn test_record_functions_emit_expected_metrics() {
+        use super::*;
+
+        let handle = init_metrics();
+
+        record_connection_opened();
+        record_connection_closed();
+        record_connection_rejected("rate_limit");
+        record_query_processed("postgres", 0.01);
+        record_fields_masked(2);
+        record_masking_error();
+        record_health_check(true, Some(5));
+        record_health_check(false, None);
+        record_upstream_timeout();
+        record_idle_timeout();
+        record_upstream_pool_wait(0.02);
+        record_upstream_pool_acquire_timeout();
+        set_upstream_pool_state(2, 4);
+        set_upstream_pool_state(0, 0);
+
+        let output = handle.render();
+        for name in [
+            "ironveil_connections_total",
+            "ironveil_connections_active",
+            "ironveil_connections_rejected_total",
+            "ironveil_queries_total",
+            "ironveil_query_duration_seconds",
+            "ironveil_fields_masked_total",
+            "ironveil_masking_errors_total",
+            "ironveil_upstream_health_check_latency_ms",
+            "ironveil_upstream_healthy",
+            "ironveil_upstream_timeouts_total",
+            "ironveil_idle_timeouts_total",
+            "ironveil_upstream_pool_wait_seconds",
+            "ironveil_upstream_pool_acquire_timeouts_total",
+            "ironveil_upstream_pool_active_connections",
+            "ironveil_upstream_pool_size",
+            "ironveil_upstream_pool_utilization_ratio",
+        ] {
+            assert!(output.contains(name), "missing metric {name}");
+        }
+    }
 }

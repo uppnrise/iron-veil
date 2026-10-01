@@ -376,4 +376,69 @@ limits:
         assert_eq!(limits.upstream_pool_size, Some(50));
         assert_eq!(limits.upstream_pool_wait_timeout_secs, 12);
     }
+
+    #[test]
+    fn test_health_check_defaults() {
+        let hc = HealthCheckConfig::default();
+        assert!(hc.enabled);
+        assert_eq!(hc.interval_secs, 10);
+        assert_eq!(hc.timeout_secs, 5);
+        assert_eq!(hc.unhealthy_threshold, 3);
+        assert_eq!(hc.healthy_threshold, 1);
+
+        let parsed: HealthCheckConfig = serde_yaml_ng::from_str("{}").unwrap();
+        assert_eq!(parsed.interval_secs, hc.interval_secs);
+    }
+
+    #[test]
+    fn test_audit_defaults() {
+        let audit = AuditConfig::default();
+        assert!(audit.enabled);
+        assert!(!audit.log_to_stdout);
+        assert!(audit.log_file.is_none());
+        assert!(audit.rotation_enabled);
+        assert!(audit.events.is_empty());
+    }
+
+    #[test]
+    fn test_telemetry_defaults() {
+        let t: TelemetryConfig = serde_yaml_ng::from_str("{}").unwrap();
+        assert!(!t.enabled);
+        assert_eq!(t.otlp_endpoint, "http://localhost:4317");
+        assert_eq!(t.service_name, "iron-veil");
+    }
+
+    #[test]
+    fn test_app_config_default() {
+        let config = AppConfig::default();
+        assert!(config.masking_enabled);
+        assert!(config.rules.is_empty());
+        assert!(config.tls.is_none());
+        assert!(!config.upstream_tls);
+        assert!(config.api.is_none());
+    }
+
+    #[test]
+    fn test_load_reads_file_and_errors_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("proxy.yaml");
+        std::fs::write(&path, "rules: []\n").unwrap();
+
+        let config = AppConfig::load(path.to_str().unwrap()).unwrap();
+        assert!(config.masking_enabled);
+
+        assert!(AppConfig::load(dir.path().join("missing.yaml").to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn test_config_yaml_roundtrip() {
+        let yaml = "masking_enabled: false\nrules:\n  - column: email\n    strategy: email\n";
+        let config: AppConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let out = serde_yaml_ng::to_string(&config).unwrap();
+        let again: AppConfig = serde_yaml_ng::from_str(&out).unwrap();
+
+        assert!(!again.masking_enabled);
+        assert_eq!(again.rules.len(), 1);
+        assert_eq!(again.rules[0].column, "email");
+    }
 }
