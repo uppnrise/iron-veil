@@ -691,4 +691,67 @@ mod tests {
         assert!(content.contains("\"event_type\":\"config_change\""));
         assert!(content.ends_with('\n'));
     }
+
+    #[test]
+    fn test_audit_entry_builders() {
+        let entry = AuditEntry::new(AuditEventType::ApiAccess, AuditOutcome::Denied)
+            .with_user_id("alice")
+            .with_method("POST")
+            .with_details(serde_json::json!({"a": 1}));
+
+        assert_eq!(entry.user_id.as_deref(), Some("alice"));
+        assert_eq!(entry.method.as_deref(), Some("POST"));
+        assert_eq!(entry.details, Some(serde_json::json!({"a": 1})));
+        assert!(!entry.id.is_empty());
+    }
+
+    #[test]
+    fn test_audit_config_serde_defaults() {
+        let cfg: AuditConfig = serde_yaml_ng::from_str("{}").unwrap();
+        assert!(cfg.enabled);
+        assert!(cfg.rotation_enabled);
+        assert_eq!(cfg.max_file_size_bytes, MAX_LOG_FILE_SIZE);
+        assert_eq!(cfg.max_rotated_files, MAX_ROTATED_FILES);
+        assert!(cfg.events.is_empty());
+    }
+
+    #[test]
+    fn test_write_to_file_blocking_rotates_when_over_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+        let config = AuditConfig {
+            max_file_size_bytes: 1,
+            max_rotated_files: 2,
+            ..AuditConfig::default()
+        };
+        let entry = AuditEntry::new(AuditEventType::ApiAccess, AuditOutcome::Success);
+
+        for _ in 0..4 {
+            AuditLogger::write_to_file_blocking(&path, &entry, &config).unwrap();
+        }
+
+        assert!(path.exists());
+        assert!(dir.path().join("audit.log.1").exists());
+        assert!(dir.path().join("audit.log.2").exists());
+        // max_rotated_files = 2, so a third backup must never exist.
+        assert!(!dir.path().join("audit.log.3").exists());
+    }
+
+    #[test]
+    fn test_write_to_file_blocking_without_rotation_appends() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+        let config = AuditConfig {
+            rotation_enabled: false,
+            max_file_size_bytes: 1,
+            ..AuditConfig::default()
+        };
+        let entry = AuditEntry::new(AuditEventType::ApiAccess, AuditOutcome::Success);
+
+        AuditLogger::write_to_file_blocking(&path, &entry, &config).unwrap();
+        AuditLogger::write_to_file_blocking(&path, &entry, &config).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 2);
+        assert!(!dir.path().join("audit.log.1").exists());
+    }
 }

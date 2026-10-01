@@ -15,7 +15,7 @@ thiserror = "2.0"
 futures = "0.3.34"
 fake = { version = "5.1.0", features = ["derive"] }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_yaml = "0.9.34"
+serde_yaml_ng = "0.10.0"
 rand = "0.10.2"
 rand_chacha = "0.10.0"
 regex = "1.13.1"
@@ -26,17 +26,16 @@ tower-http = { version = "0.7.1", features = ["cors", "trace"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 tokio-rustls = "0.26.5"
 rustls = "0.23.43"
-rustls-pemfile = "2.2.0"
 rustls-platform-verifier = "0.7.0"
 
 # PostgreSQL client for database scanning
 tokio-postgres = "0.7"
 
 # OpenTelemetry
-opentelemetry = { version = "0.32", features = ["trace", "metrics"] }
-opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "metrics"] }
-tracing-opentelemetry = "0.33"
+opentelemetry = { version = "0.33", features = ["trace", "metrics"] }
+opentelemetry_sdk = { version = "0.33", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.33", features = ["grpc-tonic", "metrics"] }
+tracing-opentelemetry = "0.34"
 
 # JWT Authentication
 jsonwebtoken = { version = "11", features = ["rust_crypto"] }
@@ -52,5 +51,6 @@ metrics-exporter-prometheus = "0.18"
 notify = "8"
 
 [dev-dependencies]
+rcgen = "0.14.10"
 reqwest = { version = "0.13", features = ["json"] }
 tempfile = "3"

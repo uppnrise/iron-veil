@@ -26,8 +26,6 @@ use bytes::{BufMut, Bytes};
 use chrono::Utc;
 use futures::{SinkExt, StreamExt};
 use rustls_platform_verifier::Verifier;
-use std::fs::File;
-use std::io::BufReader;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tokio::io::AsyncReadExt;
@@ -37,7 +35,9 @@ use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls::ClientConfig;
 use tokio_rustls::rustls::crypto::aws_lc_rs::default_provider;
 use tokio_rustls::rustls::pki_types::ServerName;
-use tokio_rustls::rustls::{ServerConfig, pki_types::CertificateDer, pki_types::PrivateKeyDer};
+use tokio_rustls::rustls::{
+    ServerConfig, pki_types::CertificateDer, pki_types::PrivateKeyDer, pki_types::pem::PemObject,
+};
 use tokio_util::codec::Framed;
 
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
@@ -1318,28 +1318,63 @@ where
 }
 
 fn load_certs(path: &str) -> Result<Vec<CertificateDer<'static>>> {
-    let certfile = File::open(path)?;
-    let mut reader = BufReader::new(certfile);
-    let certs = rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>()?;
-    Ok(certs)
+    Ok(CertificateDer::pem_file_iter(path)?.collect::<Result<Vec<_>, _>>()?)
 }
 
 fn load_keys(path: &str) -> Result<PrivateKeyDer<'static>> {
-    let keyfile = File::open(path)?;
-    let mut reader = BufReader::new(keyfile);
-    let key = rustls_pemfile::private_key(&mut reader)?
-        .ok_or_else(|| anyhow::anyhow!("No private key found"))?;
-    Ok(key)
+    Ok(PrivateKeyDer::from_pem_file(path)?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         UpstreamPoolAcquireError, UpstreamSlotManager, build_mysql_err_packet,
-        build_postgres_fatal_error_packet, resolve_timeout_limits,
+        build_postgres_fatal_error_packet, load_certs, load_keys, resolve_timeout_limits,
     };
     use crate::config::LimitsConfig;
     use std::time::Duration;
+
+    /// Writes a freshly generated self-signed cert and key to a temp dir, so the
+    /// tests don't depend on the git-ignored `certs/` directory.
+    fn write_test_pems() -> (tempfile::TempDir, String, String) {
+        let key_pair = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let cert_path = dir.path().join("server.crt");
+        let key_path = dir.path().join("server.key");
+        std::fs::write(&cert_path, key_pair.cert.pem()).unwrap();
+        std::fs::write(&key_path, key_pair.signing_key.serialize_pem()).unwrap();
+        (
+            dir,
+            cert_path.to_string_lossy().into_owned(),
+            key_path.to_string_lossy().into_owned(),
+        )
+    }
+
+    #[test]
+    fn test_load_certs_reads_pem_certificates() {
+        let (_dir, cert, _key) = write_test_pems();
+        let certs = load_certs(&cert).unwrap();
+        assert_eq!(certs.len(), 1);
+    }
+
+    #[test]
+    fn test_load_keys_reads_pem_private_key() {
+        let (_dir, _cert, key) = write_test_pems();
+        assert!(load_keys(&key).is_ok());
+    }
+
+    #[test]
+    fn test_load_keys_errors_without_private_key() {
+        // A certificate file contains no private key.
+        let (_dir, cert, _key) = write_test_pems();
+        assert!(load_keys(&cert).is_err());
+    }
+
+    #[test]
+    fn test_load_certs_and_keys_error_on_missing_file() {
+        assert!(load_certs("/nonexistent/server.crt").is_err());
+        assert!(load_keys("/nonexistent/server.key").is_err());
+    }
 
     #[test]
     fn test_build_postgres_fatal_error_packet_format() {
