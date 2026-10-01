@@ -51,5 +51,6 @@ metrics-exporter-prometheus = "0.18"
 notify = "8"
 
 [dev-dependencies]
+rcgen = "0.14.10"
 reqwest = { version = "0.13", features = ["json"] }
 tempfile = "3"
