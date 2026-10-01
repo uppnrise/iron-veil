@@ -1329,10 +1329,37 @@ fn load_keys(path: &str) -> Result<PrivateKeyDer<'static>> {
 mod tests {
     use super::{
         UpstreamPoolAcquireError, UpstreamSlotManager, build_mysql_err_packet,
-        build_postgres_fatal_error_packet, resolve_timeout_limits,
+        build_postgres_fatal_error_packet, load_certs, load_keys, resolve_timeout_limits,
     };
     use crate::config::LimitsConfig;
     use std::time::Duration;
+
+    fn cert_path(name: &str) -> String {
+        format!("{}/certs/{}", env!("CARGO_MANIFEST_DIR"), name)
+    }
+
+    #[test]
+    fn test_load_certs_reads_pem_certificates() {
+        let certs = load_certs(&cert_path("server.crt")).unwrap();
+        assert!(!certs.is_empty());
+    }
+
+    #[test]
+    fn test_load_keys_reads_pem_private_key() {
+        assert!(load_keys(&cert_path("server.key")).is_ok());
+    }
+
+    #[test]
+    fn test_load_keys_errors_without_private_key() {
+        // A certificate file contains no private key.
+        assert!(load_keys(&cert_path("server.crt")).is_err());
+    }
+
+    #[test]
+    fn test_load_certs_and_keys_error_on_missing_file() {
+        assert!(load_certs("/nonexistent/server.crt").is_err());
+        assert!(load_keys("/nonexistent/server.key").is_err());
+    }
 
     #[test]
     fn test_build_postgres_fatal_error_packet_format() {

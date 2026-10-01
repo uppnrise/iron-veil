@@ -111,7 +111,19 @@ mod tests {
         let first = init_metrics();
         let second = init_metrics();
 
-        // Both handles should point to the same underlying registry.
-        assert_eq!(first.render(), second.render());
+        // Both handles should point to the same underlying registry. Compare a
+        // uniquely named counter rather than the whole render output, which other
+        // tests mutate concurrently through the global recorder.
+        metrics::counter!("ironveil_test_init_idempotent_total").increment(1);
+        assert!(
+            first
+                .render()
+                .contains("ironveil_test_init_idempotent_total 1")
+        );
+        assert!(
+            second
+                .render()
+                .contains("ironveil_test_init_idempotent_total 1")
+        );
     }
 }
