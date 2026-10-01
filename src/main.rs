@@ -1334,25 +1334,40 @@ mod tests {
     use crate::config::LimitsConfig;
     use std::time::Duration;
 
-    fn cert_path(name: &str) -> String {
-        format!("{}/certs/{}", env!("CARGO_MANIFEST_DIR"), name)
+    /// Writes a freshly generated self-signed cert and key to a temp dir, so the
+    /// tests don't depend on the git-ignored `certs/` directory.
+    fn write_test_pems() -> (tempfile::TempDir, String, String) {
+        let key_pair = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let cert_path = dir.path().join("server.crt");
+        let key_path = dir.path().join("server.key");
+        std::fs::write(&cert_path, key_pair.cert.pem()).unwrap();
+        std::fs::write(&key_path, key_pair.signing_key.serialize_pem()).unwrap();
+        (
+            dir,
+            cert_path.to_string_lossy().into_owned(),
+            key_path.to_string_lossy().into_owned(),
+        )
     }
 
     #[test]
     fn test_load_certs_reads_pem_certificates() {
-        let certs = load_certs(&cert_path("server.crt")).unwrap();
-        assert!(!certs.is_empty());
+        let (_dir, cert, _key) = write_test_pems();
+        let certs = load_certs(&cert).unwrap();
+        assert_eq!(certs.len(), 1);
     }
 
     #[test]
     fn test_load_keys_reads_pem_private_key() {
-        assert!(load_keys(&cert_path("server.key")).is_ok());
+        let (_dir, _cert, key) = write_test_pems();
+        assert!(load_keys(&key).is_ok());
     }
 
     #[test]
     fn test_load_keys_errors_without_private_key() {
         // A certificate file contains no private key.
-        assert!(load_keys(&cert_path("server.crt")).is_err());
+        let (_dir, cert, _key) = write_test_pems();
+        assert!(load_keys(&cert).is_err());
     }
 
     #[test]
